@@ -1,0 +1,2 @@
+Flask>=3.1,<4
+# psutil is optional: install it when supported for RAM/CPU telemetry.

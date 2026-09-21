@@ -1,0 +1,2 @@
+-r requirements.txt
+# Browser-free web research uses requests + BeautifulSoup from requirements.txt.
