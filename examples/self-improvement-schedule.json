@@ -1,0 +1,17 @@
+{
+  "name": "isolated-self-improvement",
+  "objective": "Read operator context and active goals. Scan the configured source, create an isolated source copy, fix the highest-value reproducible bug or unfinished feature only in that copy, run Docker tests, and export a reviewed patch artifact with a one-paragraph summary. Never modify or promote the authoritative source.",
+  "interval_seconds": 86400,
+  "enabled": false,
+  "payload": {
+    "self_improvement": true,
+    "self_improvement_source": "",
+    "template": "coding",
+    "deliver_as": "patch",
+    "critic_review": true,
+    "approval_mode": "auto_edit",
+    "max_steps": 40,
+    "max_seconds": 7200,
+    "max_parallel_reads": 4
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "providers": [
+    {
+      "name": "existing-harness",
+      "type": "api",
+      "base_url": "http://127.0.0.1:20128/v1",
+      "model": "replace-with-your-model-id",
+      "api_key_env": "LLM_API_KEY",
+      "priority": 0,
+      "timeout": 180
+    },
+    {
+      "name": "local-fallback",
+      "type": "api",
+      "enabled": false,
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "replace-with-installed-model",
+      "api_key_env": "LOCAL_MODEL_API_KEY",
+      "priority": 10
+    },
+    {
+      "name": "browser-model",
+      "type": "playwright",
+      "transport_policy": "blocked",
+      "enabled": false,
+      "url": "https://your-model-website.example/",
+      "profile_dir": "C:/private-agent-data/browser-profiles/model",
+      "headless": true,
+      "input_selector": "textarea[data-testid='prompt']",
+      "submit_selector": "button[data-testid='send']",
+      "response_selector": "article[data-role='assistant']",
+      "response_text_selector": "div[data-testid='answer']",
+      "completion_selector": "button[data-testid='copy-completed-response']",
+      "login_required_selector": "form[data-testid='login']",
+      "timeout": 180,
+      "priority": 20
+    }
+  ]
+}

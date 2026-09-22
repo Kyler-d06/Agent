@@ -1,0 +1,7 @@
+{
+  "description": "Hash a short supplied text and report the execution host to verify mesh offloading.",
+  "weight": "light",
+  "min_ram_gb": 0.1,
+  "requires_gpu": false,
+  "agent_permission": "autonomous"
+}

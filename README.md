@@ -63,6 +63,9 @@ The command center uses a three-pane agent-harness layout:
 
 - **Work** shows user objectives and assistant answers as durable sessions, with
   tool actions and verification beneath each answer.
+- **Prompt queue** stores permanent meta-rules, reusable model procedures,
+  bounded objectives, acceptance criteria, and model handoff links. It composes
+  prompts deterministically without calling Ollama.
 - **Context** selects the Git repository and Obsidian vault and retains quick
   capture plus reference links.
 - **Systems** retains runtime, host, Ollama, Docker, mesh, research, forecasting,
@@ -74,6 +77,13 @@ The command center uses a three-pane agent-harness layout:
 
 The **New session** panel also stores named prompt presets containing the prompt,
 engine, task procedure, priority, approval mode, and browser-fallback preference.
+The separate **Prompt queue** persists to `model-workbench.json` beside the runtime
+database. Its built-in procedures cover bounded work, trading research, minimal
+bug repair, YAGNI/compute audits, independent review, and emergency transfer.
+Owner-defined procedures require no source-code edit. A queued task can be copied
+as one complete prompt or opened as a prefilled Claude Desktop chat; the operator
+still reviews and sends it. Cross-model state remains in the configured Obsidian
+vault at `Model Handoffs/ACTIVE - Claude MCP.md`.
 Use **Context → Autonomous cycles** to start research/discovery, goal planning, or
 guarded isolated-copy self-improvement immediately without terminal commands.
 Research cycles now begin with audited host-driven reads of the discovery brief,

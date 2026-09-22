@@ -1,0 +1,10 @@
+{
+  "name": "whitespace_regression",
+  "min_score": 1.0,
+  "cases": [
+    {"input": {"text": "hello   world"}, "expected": "hello world"},
+    {"input": {"text": "\tline one\nline two\t"}, "expected": "line one line two"},
+    {"input": {"text": ""}, "expected": ""},
+    {"input": {"text": "café  東京"}, "expected": "café 東京"}
+  ]
+}

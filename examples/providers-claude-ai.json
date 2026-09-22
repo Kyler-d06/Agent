@@ -1,0 +1,56 @@
+{
+  "routing": {
+    "free_first": true,
+    "allow_paid": false,
+    "daily_paid_budget_usd": 0,
+    "monthly_paid_budget_usd": 0,
+    "estimated_output_tokens": 4096
+  },
+  "providers": [
+    {
+      "name": "qwen-executor",
+      "type": "api",
+      "cost_class": "local",
+      "open_source": true,
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen3.5:9b",
+      "api_key_env": "LOCAL_MODEL_API_KEY",
+      "supports_tools": true,
+      "priority": 0
+    },
+    {
+      "name": "claude-web",
+      "type": "playwright",
+      "transport_policy": "policy_blocked",
+      "policy_note": "Consumer-web automation is disabled; use an official API or obtain explicit provider permission before configuring approved_browser.",
+      "cost_class": "subscription",
+      "open_source": false,
+      "enabled": false,
+      "url": "https://claude.ai/new",
+      "headless": false,
+      "input_selector": "[contenteditable='true'][data-lexical-editor='true']",
+      "input_selector_fallbacks": ["div.ProseMirror[contenteditable='true']", "[contenteditable='true'][role='textbox']"],
+      "submit_selector": "button[aria-label*='Send Message' i]",
+      "submit_selector_fallbacks": ["button[aria-label*='Send' i]", "button[type='submit']"],
+      "response_selector": ".font-claude-response",
+      "response_selector_fallbacks": ["[data-role='assistant']", "article"],
+      "busy_selectors": ["button[aria-label*='Stop' i]", "button[data-testid*='stop' i]"],
+      "new_chat_selector": "a[href='/new']",
+      "login_required_selectors": ["input[type='email']", "input[type='password']", "a[href*='/login']"],
+      "quota_selectors": ["[data-testid*='usage-limit' i]", "[data-testid*='rate-limit' i]"],
+      "quota_text_scope_selector": "[role='alert'],[role='dialog']",
+      "quota_text_patterns": ["reached (your|the) .*limit", "usage limit", "try again (at|after)", "message limit"],
+      "quota_cooldown_seconds": 21600,
+      "stable_polls": 3,
+      "stable_poll_seconds": 1,
+      "max_prompt_chars": 80000,
+      "structured_text": true,
+      "supports_tools": false,
+      "priority": 20,
+      "accounts": [
+        {"name": "seat-a", "profile_dir": "C:/private-agent-data/browser-profiles/claude-seat-a"},
+        {"name": "seat-b", "profile_dir": "C:/private-agent-data/browser-profiles/claude-seat-b"}
+      ]
+    }
+  ]
+}

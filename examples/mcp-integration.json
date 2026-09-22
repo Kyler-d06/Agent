@@ -1,0 +1,16 @@
+{
+  "name": "service",
+  "type": "mcp",
+  "transport": "http",
+  "url": "https://your-mcp-service.example/mcp",
+  "headers_env": {"Authorization": "SERVICE_MCP_AUTHORIZATION"},
+  "tools": [
+    {
+      "name": "lookup",
+      "remote_name": "lookup_record",
+      "description": "Look up a record through a configured MCP server.",
+      "effect": "read",
+      "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": false}
+    }
+  ]
+}

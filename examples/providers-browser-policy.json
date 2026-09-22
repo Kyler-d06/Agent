@@ -1,0 +1,37 @@
+{
+  "description": "Consumer web-model inventory. These entries are intentionally disabled and policy-blocked; they are status metadata, not working browser adapters.",
+  "providers": [
+    {
+      "name": "chatgpt-consumer-web",
+      "type": "playwright",
+      "url": "https://chatgpt.com/",
+      "enabled": false,
+      "transport_policy": "policy_blocked",
+      "policy_note": "Do not automate an ordinary consumer session. Use an official OpenAI API integration or documented written permission."
+    },
+    {
+      "name": "claude-consumer-web",
+      "type": "playwright",
+      "url": "https://claude.ai/new",
+      "enabled": false,
+      "transport_policy": "policy_blocked",
+      "policy_note": "Do not automate an ordinary consumer session. Use the Anthropic API or documented written permission."
+    },
+    {
+      "name": "kimi-consumer-web",
+      "type": "playwright",
+      "url": "https://www.kimi.com/",
+      "enabled": false,
+      "transport_policy": "policy_blocked",
+      "policy_note": "Do not automate an ordinary consumer session. Use an official Kimi platform interface or documented written permission."
+    },
+    {
+      "name": "deepseek-consumer-web",
+      "type": "playwright",
+      "url": "https://chat.deepseek.com/",
+      "enabled": false,
+      "transport_policy": "policy_blocked",
+      "policy_note": "Do not automate an ordinary consumer session. Use the DeepSeek API or documented written permission."
+    }
+  ]
+}
