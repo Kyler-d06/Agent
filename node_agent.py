@@ -50,7 +50,7 @@ NODE_KEY = os.environ.get("NODE_KEY", "")
 NODE_PORT = int(os.environ.get("NODE_PORT", "5080"))
 MAX_OUTPUT_CHARS = int(os.environ.get("NODE_MAX_OUTPUT_CHARS", "20000"))
 
-DEFAULT_WINDOWS_ROOT = r"C:\Users\kyler\OneDrive\Documents\Scripts\Code"
+DEFAULT_WINDOWS_ROOT = str(Path.home() / "OneDrive" / "Documents" / "Scripts" / "Code")
 if os.name == "nt" and os.path.isdir(DEFAULT_WINDOWS_ROOT):
     default_roots = {"code": DEFAULT_WINDOWS_ROOT}
 else:

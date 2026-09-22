@@ -1,0 +1,7 @@
+{
+  "name": "weekly-improvement-review",
+  "objective": "Inspect platform_status, recent failed tasks, and evaluation results. Identify one repeated, evidenced failure and propose one bounded reusable prompt or capability improvement. If a relevant owner-authored suite exists and an evaluation grant permits it, evaluate the candidate. Report actual measurements and the candidate ID. If there is insufficient evidence, say so and do not invent an improvement. Promotion remains an owner decision.",
+  "interval_seconds": 604800,
+  "enabled": true,
+  "payload": {"max_steps": 16, "max_seconds": 1800}
+}

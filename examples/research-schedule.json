@@ -1,0 +1,7 @@
+{
+  "name": "daily-research-review",
+  "objective": "Review existing research questions, investigate the highest-value unresolved question, and write a cited report with a unique filename.",
+  "interval_seconds": 86400,
+  "enabled": true,
+  "payload": {"template": "research", "max_steps": 24, "max_seconds": 1800}
+}

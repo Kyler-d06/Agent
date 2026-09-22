@@ -1,0 +1,22 @@
+{
+  "name": "inventory",
+  "type": "http",
+  "base_url": "https://your-service.example/api",
+  "headers_env": {"Authorization": "INVENTORY_AUTHORIZATION"},
+  "tools": [
+    {
+      "name": "lookup",
+      "description": "Read inventory availability by product SKU.",
+      "effect": "read",
+      "method": "GET",
+      "path": "/inventory",
+      "input_schema": {
+        "type": "object",
+        "properties": {"sku": {"type": "string"}},
+        "required": ["sku"],
+        "additionalProperties": false
+      },
+      "output_schema": {"type": "object", "required": ["sku", "available"]}
+    }
+  ]
+}

@@ -88,9 +88,139 @@ MANAGED_SECRET_SPECS = {
 }
 PROTECTED_SECRET_NAMES = {"CORE_PASSWORD", "CORE_API_KEY", "CORE_SECRET", "MCP_AGENT_KEY", "MCP_HTTP_TOKEN"}
 
+DEFAULT_META_PROMPT = """Before doing any work, call save_handoff_checkpoint with the objective and initial plan. Refresh it after every major milestone and whenever checkpoint_due is true.
+
+Use universal-assistant MCP for local execution, data, tests, reports, and verification. Use GitHub for version-controlled development. Never commit directly to the default branch or merge a pull request.
+
+Prioritize correctness, safety, evidence, YAGNI, the smallest complete solution, and clear one-line solutions when they remain readable and testable. Do not add speculative abstractions, dependencies, unrelated refactors, live-trading capability, or weakened permissions. Keep conversational output short and store durable detail in artifacts and the active handoff. Stop after the acceptance criteria pass.
+
+Do not reveal hidden chain-of-thought. Record concise decisions, evidence, assumptions, uncertainty, tests, blockers, and next steps instead. If usage or context becomes constrained, stop expanding scope and update the handoff immediately."""
+
+BUILTIN_PROMPT_TEMPLATES = {
+    "bounded_task": {
+        "title": "Bounded task",
+        "description": "Complete exactly one well-defined step and stop.",
+        "content": """Read the active MCP handoff. Complete exactly one highest-priority unfinished step. State the acceptance test before acting. Do not broaden scope, repeat completed work, or begin the next step after the acceptance test passes. Verify current files and tests rather than trusting summaries blindly.""",
+    },
+    "trading_research": {
+        "title": "Trading evidence lab",
+        "description": "Design or run one falsifiable, paper-only strategy experiment.",
+        "content": """This is research and paper testing only. Never place live orders. Define one falsifiable hypothesis and acceptance criteria before viewing results. Use chronological training, validation, and an untouched final holdout. Model costs, slippage, look-ahead risk, survivorship bias, gaps, and conservative intrabar stop execution. Select parameters without the holdout and inspect the holdout once. Prefer stability across neighboring parameters over the single best result. Report insufficient evidence honestly.""",
+    },
+    "minimal_bug_repair": {
+        "title": "Minimal bug repair",
+        "description": "Reproduce, patch narrowly, test, and stop.",
+        "content": """Use logs, audit records, and a deterministic reproduction to find the first incorrect state transition. Add a regression test that fails before the fix. Apply the smallest root-cause patch. Do not hide the failure with broad exception handling or weaken validation, permissions, authentication, or logging. Run the focused test and nearest relevant suite, then inspect the diff for unrelated changes.""",
+    },
+    "yagni_audit": {
+        "title": "YAGNI and compute audit",
+        "description": "Remove or disable directly evidenced waste without rewriting the system.",
+        "content": """Audit only directly evidenced duplication, unused services, unnecessary dependencies, or measurable resource waste. Prefer disabling before deletion when evidence is incomplete. Do not introduce a new framework to remove an old one. Preserve permissions, auditability, deterministic tests, recovery, MCP, and evidence storage. Implement one independently useful simplification phase and stop after its acceptance tests pass.""",
+    },
+    "independent_review": {
+        "title": "Independent adversarial review",
+        "description": "Review a change without implementing or merging it.",
+        "content": """Independently inspect correctness, security boundaries, scope, tests, hidden assumptions, simpler alternatives, and unverified claims. Reproduce every blocking finding. Separate blocking defects, optional improvements, and speculative ideas rejected under YAGNI. Do not implement the author's design, approve unsupported trading claims, or merge anything.""",
+    },
+    "emergency_handoff": {
+        "title": "Emergency transfer",
+        "description": "Stop work and preserve an immediately resumable handoff.",
+        "content": """Stop normal work now. Do not start another edit, test, or retrieval. Immediately update save_handoff_checkpoint with the objective, repository and branch, completed work, decisions, exact changed files, commits, uncommitted changes, tests and results, artifacts, permissions, failures, unverified claims, holdout status, blockers, next three actions, resume commands, and work the next model must not repeat. Then return only the handoff path and a short status.""",
+    },
+}
+
 
 def _managed_secret_path():
     return Path(DB_PATH).resolve().parent / "managed-secrets.json"
+
+
+def _model_workbench_path():
+    return Path(DB_PATH).resolve().parent / "model-workbench.json"
+
+
+def _default_model_workbench():
+    return {"schema_version": 1, "meta_prompt": DEFAULT_META_PROMPT,
+            "custom_templates": [], "queue": [], "updated_at": time.time()}
+
+
+def _model_workbench_records():
+    path = _model_workbench_path()
+    if not path.is_file():
+        return _default_model_workbench()
+    if path.stat().st_size > 2_000_000:
+        raise ValueError("model workbench exceeds 2 MB")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("model workbench is invalid")
+    default = _default_model_workbench()
+    default.update(value)
+    if not isinstance(default.get("custom_templates"), list) or not isinstance(default.get("queue"), list):
+        raise ValueError("model workbench collections are invalid")
+    return default
+
+
+def _write_model_workbench(value):
+    path = _model_workbench_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value["updated_at"] = time.time()
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _model_templates(workbench):
+    templates = [{"id": key, "builtin": True, **value} for key, value in BUILTIN_PROMPT_TEMPLATES.items()]
+    templates.extend({**item, "builtin": False} for item in workbench.get("custom_templates", []) if isinstance(item, dict))
+    return templates
+
+
+def _compose_model_prompt(workbench, item):
+    templates = {template["id"]: template for template in _model_templates(workbench)}
+    template = templates.get(item.get("template_id")) or templates["bounded_task"]
+    parts = [
+        "# Operating rules", str(workbench.get("meta_prompt") or DEFAULT_META_PROMPT).strip(),
+        "# Procedure", str(template.get("content") or "").strip(),
+        "# Current task", str(item.get("objective") or "").strip(),
+    ]
+    if str(item.get("acceptance_criteria") or "").strip():
+        parts.extend(["# Acceptance criteria", str(item["acceptance_criteria"]).strip()])
+    parts.extend([
+        "# Durable transfer",
+        "The active handoff is `Model Handoffs/ACTIVE - Claude MCP.md` in the configured Obsidian vault. "
+        "Update it early and throughout the task so another model can resume without reconstructing context.",
+    ])
+    prompt = "\n\n".join(part for part in parts if part) + "\n"
+    if len(prompt) > 13_500:
+        raise ValueError("composed prompt exceeds the 13,500 character desktop-link limit; shorten the meta prompt or task")
+    return prompt
+
+
+def _model_workbench_state():
+    try:
+        workbench = _model_workbench_records()
+        error = None
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        workbench, error = _default_model_workbench(), str(exc)[:500]
+    queue = []
+    for item in workbench.get("queue", []):
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        try:
+            row["prompt_chars"] = len(_compose_model_prompt(workbench, row))
+        except ValueError:
+            row["prompt_chars"] = None
+        queue.append(row)
+    return {
+        "path": str(_model_workbench_path()),
+        "handoff_path": str(Path(OBSIDIAN_VAULT).resolve() / "Model Handoffs" / "ACTIVE - Claude MCP.md"),
+        "meta_prompt": str(workbench.get("meta_prompt") or DEFAULT_META_PROMPT),
+        "templates": _model_templates(workbench), "queue": queue,
+        "updated_at": workbench.get("updated_at"), "error": error,
+    }
 
 
 def _managed_secret_records():
@@ -728,6 +858,7 @@ def state():
         "world_count": world_count, "knowledge_count": knowledge_count, "feed_count": feed_count,
         "model_count": model_count, "models": models, "forecasting": forecast_summary,
         "overnight_report": overnight_report,
+        "model_workbench": _model_workbench_state(),
         "configuration": {"workspace": ROOT_DIR, "obsidian_vault": OBSIDIAN_VAULT, "research_repo": RESEARCH_REPO,
                           "executor_only": EXECUTOR_ONLY,
                           "repository_ready": (Path(ROOT_DIR).resolve() / ".git").exists(),
@@ -739,6 +870,138 @@ def state():
                           "claude_mcp": _claude_mcp_status(),
                           "managed_secrets": _managed_secret_status()},
     })
+
+
+@app.route("/api/owner/model-workbench", methods=["POST"])
+def configure_model_workbench():
+    """Maintain reusable meta-prompts and a bounded cross-model task queue."""
+    if getattr(g, "actor", None) != "owner":
+        return err("owner access required", 403)
+    d = request.get_json(silent=True) or {}
+    action = str(d.get("action") or "").strip().lower()
+    try:
+        workbench = _model_workbench_records()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return err(f"Could not load model workbench: {exc}")
+
+    def bounded_text(name, maximum, required=False):
+        value = d.get(name)
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text")
+        value = value.strip()
+        if required and not value:
+            raise ValueError(f"{name} is required")
+        if len(value) > maximum:
+            raise ValueError(f"{name} exceeds {maximum} characters")
+        return value
+
+    changed = False
+    event_data = {"actor": "owner", "action": action}
+    try:
+        if action == "save_meta":
+            workbench["meta_prompt"] = bounded_text("meta_prompt", 20_000, required=True)
+            changed = True
+        elif action == "reset_meta":
+            workbench["meta_prompt"] = DEFAULT_META_PROMPT
+            changed = True
+        elif action == "save_template":
+            title = bounded_text("title", 120, required=True)
+            description = bounded_text("description", 500)
+            content = bounded_text("content", 12_000, required=True)
+            template_id = bounded_text("id", 100) or ("custom-" + uuid.uuid4().hex)
+            if template_id in BUILTIN_PROMPT_TEMPLATES:
+                raise ValueError("built-in templates cannot be overwritten")
+            templates = [item for item in workbench.get("custom_templates", [])
+                         if isinstance(item, dict) and item.get("id") != template_id]
+            if len(templates) >= 30:
+                raise ValueError("custom template limit reached")
+            templates.append({"id": template_id, "title": title, "description": description,
+                              "content": content, "updated_at": time.time()})
+            workbench["custom_templates"] = templates
+            event_data.update({"template_id": template_id, "title": title})
+            changed = True
+        elif action == "remove_template":
+            template_id = bounded_text("id", 100, required=True)
+            if template_id in BUILTIN_PROMPT_TEMPLATES:
+                raise ValueError("built-in templates cannot be removed")
+            before = len(workbench.get("custom_templates", []))
+            workbench["custom_templates"] = [item for item in workbench.get("custom_templates", [])
+                                                if isinstance(item, dict) and item.get("id") != template_id]
+            changed = len(workbench["custom_templates"]) != before
+            event_data["template_id"] = template_id
+        elif action == "queue_task":
+            title = bounded_text("title", 160, required=True)
+            objective = bounded_text("objective", 8_000, required=True)
+            acceptance = bounded_text("acceptance_criteria", 4_000)
+            template_id = bounded_text("template_id", 100) or "bounded_task"
+            if template_id not in {item["id"] for item in _model_templates(workbench)}:
+                raise ValueError("unknown prompt template")
+            target = bounded_text("target", 30) or "claude"
+            if target not in {"claude", "chatgpt", "kimi", "deepseek", "any"}:
+                raise ValueError("unsupported target model")
+            priority = bounded_text("priority", 20) or "normal"
+            if priority not in {"low", "normal", "high"}:
+                raise ValueError("priority must be low, normal, or high")
+            queue = [item for item in workbench.get("queue", []) if isinstance(item, dict)]
+            if len(queue) >= 100:
+                raise ValueError("model task queue limit reached")
+            item = {"id": uuid.uuid4().hex, "title": title, "objective": objective,
+                    "acceptance_criteria": acceptance, "template_id": template_id,
+                    "target": target, "priority": priority, "status": "queued",
+                    "created_at": time.time(), "updated_at": time.time()}
+            queue.append(item)
+            workbench["queue"] = queue
+            event_data.update({"task_id": item["id"], "title": title, "target": target})
+            changed = True
+        elif action == "update_task":
+            task_id = bounded_text("id", 100, required=True)
+            queue = [item for item in workbench.get("queue", []) if isinstance(item, dict)]
+            item = next((item for item in queue if item.get("id") == task_id), None)
+            if item is None:
+                raise ValueError("unknown model task")
+            status = bounded_text("status", 30, required=True)
+            if status not in {"queued", "active", "blocked", "done"}:
+                raise ValueError("invalid model task status")
+            item["status"], item["updated_at"] = status, time.time()
+            event_data.update({"task_id": task_id, "status": status})
+            changed = True
+        elif action == "remove_task":
+            task_id = bounded_text("id", 100, required=True)
+            before = len(workbench.get("queue", []))
+            workbench["queue"] = [item for item in workbench.get("queue", [])
+                                    if isinstance(item, dict) and item.get("id") != task_id]
+            changed = len(workbench["queue"]) != before
+            event_data["task_id"] = task_id
+        elif action in {"compose", "launch"}:
+            task_id = bounded_text("id", 100, required=True)
+            item = next((item for item in workbench.get("queue", [])
+                         if isinstance(item, dict) and item.get("id") == task_id), None)
+            if item is None:
+                raise ValueError("unknown model task")
+            prompt = _compose_model_prompt(workbench, item)
+            if action == "launch":
+                item["status"], item["updated_at"], item["last_launched_at"] = "active", time.time(), time.time()
+                changed = True
+                event_data.update({"task_id": task_id, "target": item.get("target", "claude")})
+            if changed:
+                _write_model_workbench(workbench)
+                universal_platform.store.event("configuration.model_workbench_updated", event_data)
+            return ok({"id": task_id, "prompt": prompt, "prompt_chars": len(prompt),
+                       "claude_url": "claude://claude.ai/new?q=" + urllib.parse.quote(prompt, safe=""),
+                       "handoff_path": str(Path(OBSIDIAN_VAULT).resolve() / "Model Handoffs" / "ACTIVE - Claude MCP.md")})
+        else:
+            raise ValueError("unknown model workbench action")
+    except ValueError as exc:
+        return err(str(exc))
+    if changed:
+        try:
+            _write_model_workbench(workbench)
+        except OSError as exc:
+            return err(f"Could not save model workbench: {exc}", 500)
+        universal_platform.store.event("configuration.model_workbench_updated", event_data)
+    return ok(_model_workbench_state())
 
 
 @app.route("/api/owner/operator-context", methods=["POST"])
@@ -1099,7 +1362,9 @@ def actions():
     """Tool: list_actions — review recent tool calls (what ran, args, result, success)."""
     limit = min(int(request.args.get("limit", 50)), 200)
     db = get_db()
-    rows = db.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+    # Actions are append-only, so rowid gives the same newest-first ordering
+    # without sorting the full audit table on every dashboard/MCP request.
+    rows = db.execute("SELECT * FROM actions ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
     return ok([{**dict(r), "args": json.loads(r["args_json"]), "result": json.loads(r["result_json"] or "null"),
                 "ok": bool(r["ok"])} for r in rows])
 
@@ -2231,10 +2496,21 @@ function render(){
   const kalshiMarketRows = ((latestKalshi||{}).markets||[]).slice(0,12).map(row=>`<div class="row"><span style="flex:1"><b>${esc(row.ticker||'')}</b><br><span class="explain">${esc(row.title||'')}</span></span><span>Y ${row.yes_ask==null?'?':'$'+Number(row.yes_ask).toFixed(2)} · N ${row.no_ask==null?'?':'$'+Number(row.no_ask).toFixed(2)}</span>${paper?`<button class="toggle" onclick="selectKalshi('${encodeURIComponent(String(row.ticker||''))}','yes')">YES</button><button class="toggle" onclick="selectKalshi('${encodeURIComponent(String(row.ticker||''))}','no')">NO</button>`:''}</div>`).join('');
   const candidateRows = ((backtest||{}).candidates||[]).map(row=>`<tr><td>${esc(row.strategy||'')}</td><td>${esc(String((row.train||{}).trades||0))}</td><td>${Number((row.train||{}).expectancy_bps||0).toFixed(2)} bps</td><td>${esc(String((row.test||{}).trades||0))}</td><td>${Number((row.test||{}).expectancy_bps||0).toFixed(2)} bps</td><td>${Number((row.test||{}).profit_factor||0).toFixed(2)}</td></tr>`).join('');
   const latestFinished = state.jobs.find(j => ['done','failed','blocked','awaiting_approval'].includes(j.status));
+  const modelWorkbench = state.model_workbench || {templates:[],queue:[],meta_prompt:'',handoff_path:''};
+  const modelTemplates = modelWorkbench.templates || [];
+  const modelQueue = modelWorkbench.queue || [];
+  const templateOptions = modelTemplates.map(t=>`<option value="${esc(t.id)}">${esc(t.title)}${t.builtin?'':' · custom'}</option>`).join('');
+  const modelTaskRows = modelQueue.slice().sort((a,b)=>({high:0,normal:1,low:2}[a.priority]??1)-({high:0,normal:1,low:2}[b.priority]??1) || Number(a.created_at||0)-Number(b.created_at||0)).map(item=>`<article class="session"><div class="session-head"><span class="tag">${esc(item.status||'queued')}</span><span class="tag">${esc(item.target||'claude')}</span><span class="tag">${esc(item.priority||'normal')}</span><b style="flex:1">${esc(item.title||'Untitled task')}</b><span>${item.prompt_chars==null?'too long':esc(String(item.prompt_chars))+' chars'}</span></div><p>${esc(item.objective||'')}</p>${item.acceptance_criteria?`<details><summary>Acceptance criteria</summary><pre>${esc(item.acceptance_criteria)}</pre></details>`:''}<div class="row"><button class="ghost" onclick="copyModelPrompt('${esc(item.id)}')">Copy complete prompt</button>${(item.target||'claude')==='claude'||(item.target||'claude')==='any'?`<button class="ghost" onclick="openClaudeTask('${esc(item.id)}')">Open in Claude</button>`:''}<select class="input" style="max-width:150px" onchange="updateModelTask('${esc(item.id)}',this.value)">${['queued','active','blocked','done'].map(status=>`<option value="${status}" ${status===item.status?'selected':''}>${status}</option>`).join('')}</select><button class="toggle" onclick="removeModelTask('${esc(item.id)}')">Remove</button></div></article>`).join('');
   const views = {
     work: `<div class="view-title"><div><h2>Work sessions</h2><p>Each request becomes a durable, logged session. Open a session for its answer, tools, and verification.</p></div><span class="tag">${state.jobs.filter(j => ['queued','running'].includes(j.status)).length} active</span></div>
       ${state.jobs.map(j => `<article class="session"><div class="session-head"><span class="tag">${esc(j.status)}</span><span class="tag">${esc(j.engine || 'universal')}</span><span>${esc(j.id)}</span><span style="margin-left:auto">${esc(j.updated_at || '')}</span></div><div class="message user"><span class="message-label">You</span>${esc(j.objective)}</div><div class="message assistant"><span class="message-label">Assistant</span>${esc(jobOutput(j))}</div>${jobDetails(j)}</article>`).join('') || '<div class="panel"><div class="body"><p class="hint">No sessions yet. Start one below.</p></div></div>'}
       ${composerOpen ? `<div class="panel composer"><h3>New session <span>durable + audited <button class="icon composer-close" onclick="setComposerOpen(false)" title="Close new session panel" aria-label="Close new session panel">&times;</button></span></h3><div class="body actions"><textarea id="jobObjective" placeholder="Describe the result you want. Include files, constraints, and how success should be checked."></textarea><select id="jobEngine" class="input" onchange="updateEngineHelp()"><option value="universal">Universal durable agent</option><option value="dsh">DSH coding agent</option></select><select id="jobTemplate" class="input" onchange="updateTemplateHelp()"><option value="">general</option><option value="coding">coding</option><option value="research">research</option><option value="forecast">forecast</option><option value="impact">impact</option><option value="office">office</option><option value="browser">browser</option><option value="operations">operations</option></select><select id="jobPriority" class="input"><option value="0.5">normal priority</option><option value="0.9">high priority</option><option value="0.1">low priority</option></select><select id="approvalMode" class="input"><option value="suggest">suggest — approve every side effect</option><option value="auto_edit" selected>auto-edit — local file edits run</option><option value="full_auto">full-auto — use existing grants automatically</option></select><p id="engineHelp" class="explain">Runs through leases, checkpoints, permission grants, verified tools, and the full audit trail.</p><p id="templateHelp" class="explain">General answers and mixed tasks. The assistant chooses only relevant tools.</p><label class="consent"><input id="autoRepairOnFailure" type="checkbox" checked><span><b>Automatically diagnose harness failures.</b><br>Deterministic stuck-agent failures may queue a repair in an isolated source copy. Suggest mode still requires your grant, execution still requires an existing grant, and patches are never promoted automatically.</span></label><label class="consent"><input id="browserEscalation" type="checkbox" ${((platform.model_routes||[]).some(p=>p.enabled && p.type==='playwright' && p.transport_policy==='approved_browser'))?'':'disabled'}><span><b>Allow approved browser fallback for this job.</b><br>This may send the objective, bounded conversation, tool schemas, and tool results to a third party. It never enables policy-blocked providers. ${((platform.model_routes||[]).some(p=>p.enabled && p.type==='playwright' && p.transport_policy==='approved_browser'))?'':'No approved browser route is configured.'}</span></label><button class="ghost" onclick="queueJob()">Run as new logged job</button></div></div>` : `<button class="ghost composer-launcher" onclick="setComposerOpen(true)">+ New session</button>`}`,
+    prompts: `<div class="view-title"><div><h2>Prompt & model queue</h2><p>Store your permanent operating rules once, combine them with reusable procedures, and launch bounded tasks without reconstructing prompts.</p></div><span class="tag">${modelQueue.filter(item=>item.status!=='done').length} open</span></div>
+      ${modelWorkbench.error?`<div class="panel"><div class="body"><p class="bad">${esc(modelWorkbench.error)}</p></div></div>`:''}
+      <div class="grid"><div class="panel"><h3>Queue a model task <span>meta-prompted</span></h3><div class="body"><label class="explain" for="modelTaskTitle">Short title</label><input id="modelTaskTitle" class="input" placeholder="Test trailing-stop execution"><label class="explain" for="modelTaskObjective">What must be accomplished</label><textarea id="modelTaskObjective" placeholder="One bounded objective. The reusable operating rules are added automatically."></textarea><label class="explain" for="modelTaskAcceptance">How completion will be verified</label><textarea id="modelTaskAcceptance" placeholder="Exact tests, artifacts, or observable result required."></textarea><label class="explain" for="modelTaskTemplate">Procedure</label><select id="modelTaskTemplate" class="input">${templateOptions}</select><select id="modelTaskTarget" class="input"><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="kimi">Kimi</option><option value="deepseek">DeepSeek</option><option value="any">Any model</option></select><select id="modelTaskPriority" class="input"><option value="normal">normal priority</option><option value="high">high priority</option><option value="low">low priority</option></select><button class="ghost" onclick="queueModelTask()">Add to model queue</button><p class="explain">The complete prompt is composed only when copied or opened. No SLM call is used.</p></div></div>
+      <div class="panel"><h3>Permanent meta-prompt <span>applied automatically</span></h3><div class="body"><p class="explain">These rules are prepended to every queued task. Store YAGNI, checkpointing, permissions, Git, and brevity rules here instead of remembering them.</p><textarea id="modelMetaPrompt" style="min-height:360px">${esc(modelWorkbench.meta_prompt||'')}</textarea><button class="ghost" onclick="saveModelMetaPrompt()">Save meta-prompt</button><button class="toggle" onclick="resetModelMetaPrompt()">Restore safe default</button><p class="path-value">${esc(modelWorkbench.path||'')}</p><p class="path-value">Active transfer: ${esc(modelWorkbench.handoff_path||'')}</p></div></div></div>
+      <div class="panel"><h3>Queued work <span>${modelQueue.length} total</span></h3><div class="body">${modelTaskRows||'<p class="hint">No model tasks queued. Add one above; your saved rules and selected procedure will be attached automatically.</p>'}</div></div>
+      <div class="panel"><h3>Prompt procedures <span>${modelTemplates.length} available</span></h3><div class="body"><div class="grid">${modelTemplates.map(t=>`<details class="audit-item"><summary><span class="tag">${t.builtin?'built-in':'custom'}</span><b>${esc(t.title)}</b></summary><p>${esc(t.description||'')}</p><pre>${esc(t.content||'')}</pre>${t.builtin?'':`<button class="toggle" onclick="removeModelTemplate('${esc(t.id)}')">Remove custom procedure</button>`}</details>`).join('')}</div><hr><h3>Add custom procedure</h3><input id="customTemplateTitle" class="input" placeholder="Procedure name"><input id="customTemplateDescription" class="input" placeholder="When to use it"><textarea id="customTemplateContent" placeholder="Task-specific procedure. Permanent operating rules are added separately."></textarea><button class="ghost" onclick="saveModelTemplate()">Save custom procedure</button></div></div>`,
     context: `<div class="view-title"><div><h2>Workspace & context</h2><p>The repository is the editable boundary. The vault supplies durable notes and context.</p></div></div><div class="grid"><div class="panel"><h3>Connected folders <span>saved for restart</span></h3><div class="body"><label class="explain" for="repositoryPath">Editable Git repository</label><input id="repositoryPath" class="input" value="${esc(configuration.workspace || '')}" placeholder="C:\\path\\to\\repository"><label class="explain" for="vaultPath">Existing Obsidian vault</label><input id="vaultPath" class="input" value="${esc(configuration.obsidian_vault || '')}" placeholder="C:\\path\\to\\vault"><button class="ghost" onclick="savePaths()">Save folders for next restart</button><p class="explain">The repository must contain <code>.git</code>. Saving does not interrupt running jobs; restart the pilot to activate the new boundary. Terminal fallback: <code>START_PILOT.cmd configure</code>.</p></div></div><div class="panel"><h3>DSH + Ollama <span>saved for restart</span></h3><div class="body"><label class="explain" for="dshModel">Exact installed Ollama tag</label><input id="dshModel" class="input" value="${esc(configuration.dsh_model || readiness.dsh_model || 'qwen3.5:4b')}" placeholder="qwen3.5:4b"><label class="explain" for="dshContext">Context window</label><input id="dshContext" class="input" type="number" min="2048" max="262144" value="${esc(configuration.dsh_context_window || 8192)}"><label class="explain" for="dshReasoning">Reasoning effort</label><select id="dshReasoning" class="input">${['default','none','low','medium','high'].map(value=>`<option value="${value}" ${value===(configuration.dsh_reasoning_effort||'default')?'selected':''}>${value}</option>`).join('')}</select><button class="ghost" onclick="saveDshSettings()">Save DSH model + context</button><p class="explain">Use <code>default</code> unless the selected model advertises effort levels. The integrated launch adds a final DSH settings layer with provider <code>ollama</code>, avoiding the stale global provider/model pairing. An external Ollama server must already use the same context setting or be restarted under this launcher.</p></div></div><div class="panel"><h3>Operator context <span>always loaded</span></h3><div class="body"><p class="explain">Edit the priorities and constraints every autonomous goal and job should consider. This adds context, never permissions.</p><textarea id="operatorContext" style="min-height:220px" placeholder="# Operator context\n\nCurrent priorities...">${esc(configuration.operator_context || '')}</textarea><button class="ghost" onclick="saveOperatorContext()">Save operator context</button><button class="ghost" onclick="queueGoalPlanning()">Derive goals from this context</button><button class="ghost" onclick="queueSelfImprovement()">Scan source and repair an isolated copy</button><p class="path-value">${esc(configuration.operator_context_path || '')}</p></div></div><div class="panel"><h3>Quick capture <span>${state.capture.length} recent</span></h3><div class="body"><p class="explain">Save a short owner note. This is separate from files in the linked Obsidian vault.</p><input id="captureTag" class="input" placeholder="tag"><textarea id="captureText" placeholder="Type a note..."></textarea><button class="ghost" onclick="addCapture()">Save note</button>${state.capture.map(c => `<div class="row"><span class="tag">${esc(c.tag||'—')}</span><span style="flex:1">${esc(c.text)}</span><button class="icon" onclick="removeCapture('${c.id}')">&times;</button></div>`).join('')}</div></div><div class="panel"><h3>Reference links <span>${state.vault.length}</span></h3><div class="body"><p class="explain">Bookmarks for people using the dashboard; these are not the Obsidian folder connection.</p>${state.vault.map(l => `<div class="row"><span class="tag">${esc(l.tag||'—')}</span><a class="link" href="${esc(l.url)}" target="_blank">${esc(l.name)}</a><button class="icon" onclick="removeVault('${l.id}')">&times;</button></div>`).join('') || '<p class="hint">No links yet.</p>'}<button class="ghost" onclick="addVault()">Add reference link</button></div></div></div>`,
     systems: `<div class="view-title"><div><h2>Systems & capabilities</h2><p>Runtime health, models, DSH, browser transport, mesh nodes, research state, workflows, and generated tools.</p></div></div><div class="grid"><div class="panel"><h3>Runtime <span class="${maintenance.running ? 'good' : 'bad'}">${maintenance.running ? 'supervised' : 'unavailable'}</span></h3><div class="body"><p class="explain">The supervisor restarts enabled local services and reports readiness.</p><div class="row"><span class="dot dot-online"></span><span style="flex:1">core API</span><span>${esc(location.host)}</span></div>${services.map(s => `<div class="row"><span class="dot ${s.status === 'running' ? 'dot-online' : s.status === 'starting' ? 'dot-unreachable' : 'dot-offline'}"></span><span style="flex:1">${esc(s.name)}</span><span>${esc(s.status)}</span></div>`).join('')}<div class="row"><span class="dot ${readiness.ollama_installed ? 'dot-online' : 'dot-offline'}"></span><span style="flex:1">Ollama</span><span>${readiness.ollama_installed ? esc((readiness.dsh_model||'installed')+' · '+(readiness.ollama_context_length||'?')+' ctx') : 'missing'}</span></div><div class="row"><span class="dot ${readiness.dsh_configured ? 'dot-online' : 'dot-unconfigured'}"></span><span style="flex:1">DSH ${esc(readiness.dsh_version || '')}</span><span>${readiness.dsh_configured ? esc((readiness.dsh_model||'?')+' · '+(readiness.dsh_context_window||'?')+' ctx') : esc(readiness.dsh_config_error || 'not configured')}</span></div><div class="row"><span class="dot ${readiness.playwright_chromium_ready ? 'dot-online' : 'dot-offline'}"></span><span style="flex:1">Playwright Chromium</span><span>${readiness.playwright_chromium_ready ? 'ready' : 'setup required'}</span></div><div class="row"><span class="dot ${(readiness.approved_browser_routes||0)>0 ? 'dot-online' : 'dot-unconfigured'}"></span><span style="flex:1">approved browser routes</span><span>${readiness.approved_browser_routes||0}</span></div><div class="row"><span class="dot ${readiness.docker_daemon_ready ? 'dot-online' : 'dot-offline'}"></span><span style="flex:1">Docker sandbox</span><span>${readiness.docker_daemon_ready ? 'ready' : 'unavailable'}</span></div>${readiness.dsh_web_url ? `<a class="ghost inline-link" href="${esc(readiness.dsh_web_url)}" target="_blank" rel="noopener">Open DSH Web</a>` : ''}</div></div><div class="panel"><h3>Host health <span class="${systemHealth.severity === 'ok' ? 'good' : systemHealth.severity === 'critical' ? 'bad' : 'warn'}">${esc(systemHealth.severity || 'unknown')}</span></h3><div class="body"><p class="explain">Live resource pressure used to prevent unsafe local-model concurrency.</p><div class="row"><span class="tag">CPU</span><span style="flex:1">${host.cpu_count_logical || '?'} logical</span><span>${host.cpu_util_pct == null ? '?' : host.cpu_util_pct+'%'}</span></div><div class="row"><span class="tag">RAM</span><span style="flex:1">${host.ram_used_gb == null ? '?' : host.ram_used_gb+' / '+host.ram_total_gb+' GiB'}</span><span>${host.ram_used_pct == null ? '?' : host.ram_used_pct+'%'}</span></div><div class="row"><span class="tag">disk</span><span style="flex:1">${host.disk_free_gb == null ? '?' : host.disk_free_gb+' GiB free'}</span><span>${host.disk_used_pct == null ? '?' : host.disk_used_pct+'%'}</span></div>${(systemHealth.alerts || []).map(a => `<div class="row"><span class="tag">${esc(a.severity)}</span><span class="warn">${esc(a.kind)}: ${esc(a.value)}</span></div>`).join('')}</div></div><div class="panel"><h3>Models <span>${state.models.length}</span></h3><div class="body"><p class="explain">Routes are ranked by cost, availability, validity, and recent latency. Browser routes require both approved policy and per-job disclosure.</p>${(platform.model_routes||[]).map(m => `<div class="row"><span class="tag">${esc(m.type)}</span><span style="flex:1">${esc(m.name)}</span><span>${esc(m.type==='playwright' ? m.transport_policy : (m.model||'configured'))}</span></div>`).join('') || state.models.map(m => `<div class="row"><span class="tag">${esc(m.provider)}</span><span style="flex:1">${esc(m.name)}</span><span>${m.runs ? Math.round((m.success_rate||0)*100)+'% / '+Math.round(m.latency_ema_ms||0)+'ms' : 'unscored'}</span></div>`).join('') || '<p class="hint">No models.</p>'}<div class="row"><span class="tag">spend</span><span style="flex:1">today ${money(spending.today_usd)}</span><span>month ${money(spending.month_usd)}</span></div></div></div><div class="panel"><h3>Mesh nodes <span>${online}/${state.nodes.length} online</span></h3><div class="body"><p class="explain">Optional trusted computers that can run preinstalled, permission-gated scripts.</p>${state.nodes.map(n => `<div class="row"><span class="dot dot-${n.status}"></span><span style="flex:1">${esc(n.name)}</span><span>${n.latency != null ? n.latency+'ms' : n.status}</span><button class="icon" onclick="checkNode('${n.name}')">&#8635;</button><button class="icon" onclick="removeNode('${n.id}')">&times;</button></div>`).join('') || '<p class="hint">No nodes.</p>'}<button class="ghost" onclick="addNode()">Add node</button></div></div><div class="panel"><h3>Agent platform <span>${state.jobs.filter(j => ['queued','running'].includes(j.status)).length} active</span></h3><div class="body"><div class="row"><span class="tag">jobs</span><span style="flex:1">${jobCounts.queued || 0} queued / ${jobCounts.running || 0} running</span><span>${jobCounts.failed || 0} failed</span></div><div class="row"><span class="tag">tools</span><span style="flex:1">${state.capabilities.filter(c => c.status === 'active').length} active capabilities</span><span>${state.capabilities.length} tracked</span></div><div class="row"><span class="tag">flows</span><span style="flex:1">${state.workflows.filter(w => w.enabled).length} enabled workflows</span><span>${state.workflows.length} total</span></div><div class="row"><span class="tag">research</span><span style="flex:1">${state.hypothesis_count} hypotheses / ${state.discovery_count} discoveries</span><span>${state.queued_research} queued</span></div><div class="row"><span class="tag">world</span><span style="flex:1">${state.world_count} signals / ${state.knowledge_count} knowledge</span><span>${state.feed_count} feeds</span></div><div class="row"><span class="tag">ontology</span><span style="flex:1">${forecasting.ontology_entities || 0} entities / ${forecasting.ontology_relations || 0} relations</span></div><div class="row"><span class="tag">forecast</span><span style="flex:1">${forecasting.open_forecasts || 0} open / ${forecasting.resolved_forecasts || 0} resolved</span></div><div class="row"><span class="tag">impact</span><span style="flex:1">${forecasting.proposed_impacts || 0} proposed / ${forecasting.active_impacts || 0} active</span></div><div class="row"><span class="tag">events</span><span style="flex:1">${state.event_count} ingested</span></div></div></div><div class="panel"><h3>Goals <span>${state.goals.length}</span></h3><div class="body"><p class="explain">Persistent outcomes reused across jobs and context retrieval.</p>${state.goals.map(g => `<div class="row"><span class="tag">${esc(g.status)}</span><span style="flex:1">${esc(g.title)}</span><span>${Math.round((g.priority||0)*100)}</span></div>`).join('') || '<p class="hint">No goals.</p>'}</div></div><div class="panel"><h3>Generated capabilities <span>${state.capabilities.length}</span></h3><div class="body"><p class="explain">Candidate tools remain inactive until testing and owner approval.</p>${state.capabilities.map(c => `<div class="row"><span class="tag">${esc(c.status)}</span><span style="flex:1">${esc(c.name)}</span><span>${c.autonomous_allowed ? 'background' : (c.last_test_ok ? 'tested' : '')}</span></div>`).join('') || '<p class="hint">None.</p>'}</div></div><div class="panel"><h3>Schedules <span>${(platform.schedules || []).length}</span></h3><div class="body"><p class="explain">Recurring jobs coalesce missed runs and never overlap a blocked predecessor.</p>${(platform.schedules || []).map(s => `<div class="row"><span class="dot ${s.enabled ? 'dot-online' : 'dot-unconfigured'}"></span><span style="flex:1">${esc(s.name)}</span><span>${s.next_run ? new Date(s.next_run*1000).toLocaleString() : 'off'}</span></div>`).join('') || '<p class="hint">No schedules.</p>'}</div></div><div class="panel"><h3>Ambient relay <button class="toggle ${state.audio.enabled ? 'on' : ''}" onclick="toggleAudio()">${state.audio.enabled ? 'on' : 'off'}</button></h3><div class="body"><p class="explain">Controls the existing ambient audio/event relay. Off means no ambient relay activity.</p></div></div></div>`,
     trading: `<div class="view-title"><div><h2>Trading evidence lab</h2><p>Collect market data, execute fixed rules, and display reproducible results. No local model reasons, hypothesizes, or interprets outcomes.</p></div><span class="tag">paper research only</span></div>
@@ -2258,7 +2534,7 @@ function render(){
   }
   const latestDecision = latestFinished ? auditRecords.find(r => r.kind === 'model.response' && (r.data || {}).job_id === latestFinished.id) : null;
   views.context = `<div class="panel"><h3>Autonomous cycles <span>one click + fully audited</span></h3><div class="body"><p class="explain">Start one bounded cycle now. Duplicate active cycles are coalesced, and self-improvement can edit only an isolated source copy.</p><label class="consent"><input id="cycleBrowserEscalation" type="checkbox" ${((platform.model_routes||[]).some(p=>p.enabled && p.type==='playwright' && p.transport_policy==='approved_browser'))?'':'disabled'}><span><b>Allow approved browser fallback for this research cycle.</b><br>Used only after local non-progress and only when an approved route exists.</span></label><button class="ghost" onclick="queueResearchCycle()">Run research & discovery now</button><button class="ghost" onclick="queueGoalPlanning()">Derive goals from operator context</button><button class="ghost" onclick="queueSelfImprovement('')">Scan and repair an isolated copy</button></div></div>` + views.context;
-  document.getElementById('panels').innerHTML = `<div class="workbench"><aside class="side-panel"><div class="brand">Universal Harness</div><div class="brand-sub">persistent local agent + DSH adapter</div><div class="metric"><b>REPOSITORY</b><span>${esc(shortPath(configuration.workspace))}</span></div><div class="nav-list">${[['work','Work'],['trading','Trading'],['secrets','Keys'],['context','Context'],['systems','Systems'],['audit','Audit'],['guide','Guide']].map(v => `<button class="nav-button ${activeView===v[0]?'active':''}" onclick="setView('${v[0]}')">${v[1]}</button>`).join('')}</div><hr style="border:0;border-top:1px solid var(--line);margin:12px 0"><div class="explain"><span class="dot ${maintenance.running ? 'dot-online' : 'dot-offline'}" style="display:inline-block"></span> ${maintenance.running ? 'Supervisor running' : 'Supervisor unavailable'}<br><span class="dot ${readiness.ollama_api_ready ? 'dot-online' : 'dot-unreachable'}" style="display:inline-block"></span> Ollama ${readiness.ollama_api_ready ? 'ready' : 'check runtime'}<br><span class="dot ${readiness.dsh_configured ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> DSH ${readiness.dsh_configured ? 'integrated' : 'optional'}<br><span class="dot ${readiness.playwright_chromium_ready ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> Playwright ${readiness.playwright_chromium_ready ? 'ready' : 'setup'}<br><span class="dot ${readiness.docker_daemon_ready ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> Docker ${readiness.docker_daemon_ready ? 'ready' : 'optional'}</div></aside><main>${views[activeView] || views.work}</main><aside class="side-panel inspector"><div class="brand-sub">SESSION INSPECTOR</div>${latestFinished ? `<div class="metric"><b>JOB</b><span>${esc(latestFinished.id)}</span></div><div class="metric"><b>ENGINE</b><span>${esc(latestFinished.engine || 'universal')}</span></div><div class="metric"><b>STATUS</b><span>${esc(latestFinished.status)}</span></div><div class="metric"><b>VERIFICATION</b><span>${esc(((latestFinished.result||{}).verification||{}).status || 'not specified')}</span></div><div class="metric"><b>PLAN</b><span>${esc(((latestFinished.result||{}).plan||[]).map(s=>`${s.status}: ${s.step}`).join(' · ') || 'not supplied')}</span></div><div class="metric"><b>ROLES</b><span>${esc(((latestFinished.result||{}).roles||[]).join(' → ') || 'default')}</span></div><div class="metric"><b>TOOLS USED</b><span>${esc(((latestFinished.result||{}).actions||[]).map(a=>a.tool).join(', ') || 'none')}</span></div><div class="metric"><b>MODEL DECISION</b><span>${esc(latestDecision ? (latestDecision.data.decision_summary || 'No summary supplied') : latestFinished.engine === 'dsh' ? 'DSH trace is recorded under Audit' : 'Open Audit for model events')}</span></div><button class="ghost" onclick="setView('audit')">Inspect full audit</button>` : '<p class="hint">A completed or blocked job will appear here.</p>'}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0"><p class="explain"><b>Two coding modes</b><br>Choose DSH for its coding-agent workflow. Its stdout/stderr and before/after Git state are ingested here, but its built-in shell and editor do not pass through Universal tool grants. Choose Universal when grants, checkpoints, and per-tool verification are required.</p>${readiness.dsh_web_url ? `<a class="ghost inline-link" href="${esc(readiness.dsh_web_url)}" target="_blank" rel="noopener">Open interactive DSH</a>` : ''}</aside></div>`;
+  document.getElementById('panels').innerHTML = `<div class="workbench"><aside class="side-panel"><div class="brand">Universal Harness</div><div class="brand-sub">persistent local agent + DSH adapter</div><div class="metric"><b>REPOSITORY</b><span>${esc(shortPath(configuration.workspace))}</span></div><div class="nav-list">${[['work','Work'],['prompts','Prompt queue'],['trading','Trading'],['secrets','Keys'],['context','Context'],['systems','Systems'],['audit','Audit'],['guide','Guide']].map(v => `<button class="nav-button ${activeView===v[0]?'active':''}" onclick="setView('${v[0]}')">${v[1]}</button>`).join('')}</div><hr style="border:0;border-top:1px solid var(--line);margin:12px 0"><div class="explain"><span class="dot ${maintenance.running ? 'dot-online' : 'dot-offline'}" style="display:inline-block"></span> ${maintenance.running ? 'Supervisor running' : 'Supervisor unavailable'}<br><span class="dot ${readiness.ollama_api_ready ? 'dot-online' : 'dot-unreachable'}" style="display:inline-block"></span> Ollama ${readiness.ollama_api_ready ? 'ready' : 'check runtime'}<br><span class="dot ${readiness.dsh_configured ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> DSH ${readiness.dsh_configured ? 'integrated' : 'optional'}<br><span class="dot ${readiness.playwright_chromium_ready ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> Playwright ${readiness.playwright_chromium_ready ? 'ready' : 'setup'}<br><span class="dot ${readiness.docker_daemon_ready ? 'dot-online' : 'dot-unconfigured'}" style="display:inline-block"></span> Docker ${readiness.docker_daemon_ready ? 'ready' : 'optional'}</div></aside><main>${views[activeView] || views.work}</main><aside class="side-panel inspector"><div class="brand-sub">SESSION INSPECTOR</div>${latestFinished ? `<div class="metric"><b>JOB</b><span>${esc(latestFinished.id)}</span></div><div class="metric"><b>ENGINE</b><span>${esc(latestFinished.engine || 'universal')}</span></div><div class="metric"><b>STATUS</b><span>${esc(latestFinished.status)}</span></div><div class="metric"><b>VERIFICATION</b><span>${esc(((latestFinished.result||{}).verification||{}).status || 'not specified')}</span></div><div class="metric"><b>PLAN</b><span>${esc(((latestFinished.result||{}).plan||[]).map(s=>`${s.status}: ${s.step}`).join(' · ') || 'not supplied')}</span></div><div class="metric"><b>ROLES</b><span>${esc(((latestFinished.result||{}).roles||[]).join(' → ') || 'default')}</span></div><div class="metric"><b>TOOLS USED</b><span>${esc(((latestFinished.result||{}).actions||[]).map(a=>a.tool).join(', ') || 'none')}</span></div><div class="metric"><b>MODEL DECISION</b><span>${esc(latestDecision ? (latestDecision.data.decision_summary || 'No summary supplied') : latestFinished.engine === 'dsh' ? 'DSH trace is recorded under Audit' : 'Open Audit for model events')}</span></div><button class="ghost" onclick="setView('audit')">Inspect full audit</button>` : '<p class="hint">A completed or blocked job will appear here.</p>'}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0"><p class="explain"><b>Two coding modes</b><br>Choose DSH for its coding-agent workflow. Its stdout/stderr and before/after Git state are ingested here, but its built-in shell and editor do not pass through Universal tool grants. Choose Universal when grants, checkpoints, and per-tool verification are required.</p>${readiness.dsh_web_url ? `<a class="ghost inline-link" href="${esc(readiness.dsh_web_url)}" target="_blank" rel="noopener">Open interactive DSH</a>` : ''}</aside></div>`;
   for(const id of ['browserEscalation','cycleBrowserEscalation']){
     const control=document.getElementById(id);
     if(control && control.closest('label')) control.closest('label').remove();
@@ -2407,6 +2683,7 @@ async function deletePromptPreset(){
 function guideCards(){
   const cards=[
     ['Start a work session','Describe the finished result, choose Universal for permission-gated tools or DSH for its coding workflow, then select a procedure and approval mode. Jobs survive worker restarts through leases and checkpoints.','New session','new_session'],
+    ['Prompt and model queue','Save permanent operating rules, reusable procedures, bounded objectives, and acceptance criteria once. Copy a composed prompt for any model or open a prefilled Claude chat without spending SLM compute.','Open prompt queue','prompts'],
     ['Prompt presets','Save a useful objective, engine, procedure, priority, and approval mode under a reusable name. Loading a preset fills the form without immediately running it.','Open presets','new_session'],
     ['Research and discovery','A research cycle loads operator context, goals, local RAG context, web-search tools, and falsifiable research state. Duplicate active cycles are coalesced.','Research controls','context'],
     ['Loop frequencies','Control how often overnight research, reports, memory consolidation, health checks, permission notifications, and idle job polling run. Changes are validated and applied on restart.','Edit frequencies','context'],
@@ -2432,7 +2709,7 @@ function guideAction(action){
   if(action==='new_session'){ activeView='work'; setComposerOpen(true); return; }
   if(action==='open_repository'){ openConfiguredPath('repository'); return; }
   if(action==='open_obsidian'){ openConfiguredPath('obsidian'); return; }
-  if(['work','context','systems','audit'].includes(action)){ setView(action); }
+  if(['work','prompts','context','systems','audit'].includes(action)){ setView(action); }
 }
 function auditSummary(record){
   const d = record.data || {};
@@ -2487,6 +2764,60 @@ async function installClaudeMcp(){
   const result=response.result||{};
   alert(`${result.changed?'Claude JSON updated.':'Claude JSON was already correct.'} Fully quit and reopen Claude Desktop.`);
   await load();
+}
+async function modelWorkbenchAction(payload){
+  const response=await api('/api/owner/model-workbench',post(payload));
+  if(!response || response.ok===false){ alert(((response||{}).error||{}).message || 'Could not update the model workbench.'); return null; }
+  return response.result||{};
+}
+async function saveModelMetaPrompt(){
+  const meta_prompt=(document.getElementById('modelMetaPrompt')?.value||'').trim();
+  if(!meta_prompt){ alert('The permanent meta-prompt cannot be empty.'); return; }
+  if(await modelWorkbenchAction({action:'save_meta',meta_prompt})){ await load(); alert('Permanent model rules saved.'); }
+}
+async function resetModelMetaPrompt(){
+  if(!confirm('Restore the safe built-in operating rules? Your queued tasks and custom procedures will remain.')) return;
+  if(await modelWorkbenchAction({action:'reset_meta'})){ await load(); }
+}
+async function queueModelTask(){
+  const title=(document.getElementById('modelTaskTitle')?.value||'').trim();
+  const objective=(document.getElementById('modelTaskObjective')?.value||'').trim();
+  const acceptance_criteria=(document.getElementById('modelTaskAcceptance')?.value||'').trim();
+  const template_id=document.getElementById('modelTaskTemplate')?.value||'bounded_task';
+  const target=document.getElementById('modelTaskTarget')?.value||'claude';
+  const priority=document.getElementById('modelTaskPriority')?.value||'normal';
+  if(!title || !objective){ alert('A title and bounded objective are required.'); return; }
+  if(await modelWorkbenchAction({action:'queue_task',title,objective,acceptance_criteria,template_id,target,priority})){ await load(); }
+}
+async function copyModelPrompt(id){
+  const result=await modelWorkbenchAction({action:'compose',id});
+  if(!result) return;
+  try { await navigator.clipboard.writeText(result.prompt); alert(`Copied ${result.prompt_chars} characters. The saved meta-prompt and procedure are included.`); }
+  catch(error){ window.prompt('Clipboard access was unavailable. Copy the prompt below:',result.prompt); }
+}
+async function openClaudeTask(id){
+  const result=await modelWorkbenchAction({action:'launch',id});
+  if(!result) return;
+  window.location.href=result.claude_url;
+  setTimeout(load,1000);
+}
+async function updateModelTask(id,status){
+  if(await modelWorkbenchAction({action:'update_task',id,status})){ await load(); }
+}
+async function removeModelTask(id){
+  if(!confirm('Remove this queued model task? Completed work and external model chats are not deleted.')) return;
+  if(await modelWorkbenchAction({action:'remove_task',id})){ await load(); }
+}
+async function saveModelTemplate(){
+  const title=(document.getElementById('customTemplateTitle')?.value||'').trim();
+  const description=(document.getElementById('customTemplateDescription')?.value||'').trim();
+  const content=(document.getElementById('customTemplateContent')?.value||'').trim();
+  if(!title || !content){ alert('A custom procedure needs a name and instructions.'); return; }
+  if(await modelWorkbenchAction({action:'save_template',title,description,content})){ await load(); }
+}
+async function removeModelTemplate(id){
+  if(!confirm('Remove this custom procedure? Existing queued tasks using it will fall back to Bounded task.')) return;
+  if(await modelWorkbenchAction({action:'remove_template',id})){ await load(); }
 }
 async function saveDshSettings(){
   const model=document.getElementById('dshModel').value.trim();

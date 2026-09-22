@@ -1,0 +1,33 @@
+{
+  "state_dir": "C:/private-agent-data/maintenance",
+  "secret_file": "C:/private-agent-data/managed-secrets.json",
+  "database_env": "CORE_DB",
+  "interval_seconds": 30,
+  "backup_interval_seconds": 21600,
+  "backup_keep": 14,
+  "dependency_check_interval_seconds": 86400,
+  "check_outdated_dependencies": true,
+  "dependency_review": {"auto_queue": true, "core_url": "http://127.0.0.1:5077", "api_key_env": "CORE_API_KEY"},
+  "backup_directories": [
+    {"name": "obsidian", "path_env": "OBSIDIAN_VAULT", "keep": 7, "max_bytes": 2000000000},
+    {"name": "research", "path_env": "RESEARCH_REPO", "keep": 7, "max_bytes": 2000000000}
+  ],
+  "secrets": [
+    {"name": "CORE_PASSWORD", "required": true, "max_age_days": 180, "auto_rotate": false},
+    {"name": "CORE_API_KEY", "required": true, "max_age_days": 90, "auto_rotate": false},
+    {"name": "DEEPSEEK_API_KEY", "required": false, "max_age_days": 90, "auto_rotate": false},
+    {"name": "X_BEARER_TOKEN", "required": false, "max_age_days": 90, "auto_rotate": false},
+    {"name": "TELEGRAM_BOT_TOKEN", "required": false, "max_age_days": 90, "auto_rotate": false},
+    {"name": "NODE_KEY", "required": false, "max_age_days": 90, "auto_rotate": false}
+  ],
+  "services": [
+    {"name": "core", "enabled": true, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "core_server.py"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_ROOT", "CORE_DB", "CORE_PASSWORD", "CORE_API_KEY", "MODEL_PROVIDERS_FILE", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_API_KEY", "NODE_KEY", "OBSIDIAN_VAULT", "RESEARCH_REPO", "MAINTENANCE_STATUS_FILE"], "health_url": "http://127.0.0.1:5077/api/system/health", "health_headers_env": {"X-API-Key": "CORE_API_KEY"}, "health_grace_seconds": 20, "health_failure_limit": 3, "log_max_bytes": 5000000, "log_keep": 5},
+    {"name": "assistant-worker", "enabled": true, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "assistant_worker.py"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "ASSISTANT_API_KEY", "ASSISTANT_RESOURCE_PAUSE_LEVEL"], "log_max_bytes": 5000000, "log_keep": 5},
+    {"name": "system-monitor", "enabled": true, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "system_monitor.py", "--watch"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "SYSTEM_MONITOR_INTERVAL", "GPU_WARN_C", "GPU_CRIT_C", "RAM_WARN_PCT", "DISK_WARN_PCT"], "log_max_bytes": 5000000, "log_keep": 3},
+    {"name": "memory-consolidation", "enabled": true, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "memory_consolidation_worker.py", "--interval", "21600"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "CONSOLIDATION_RESOURCE_PAUSE_LEVEL", "CONSOLIDATION_MIN_CLUSTER", "CONSOLIDATION_MAX_CLUSTER", "CONSOLIDATION_MAX_CLUSTERS", "CONSOLIDATION_MAX_CANDIDATES"], "log_max_bytes": 5000000, "log_keep": 3},
+    {"name": "local-model", "enabled": false, "command": ["ollama", "serve"], "cwd": "C:/private-agent-data", "env_allowlist": ["OLLAMA_HOST", "OLLAMA_MODELS"], "log_max_bytes": 5000000, "log_keep": 3},
+    {"name": "world-sources", "enabled": false, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "world_sources.py", "--interval", "3600"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "X_BEARER_TOKEN", "ALLOW_PAID_X", "X_DAILY_REQUEST_LIMIT", "X_COST_PER_REQUEST_USD", "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION"], "log_max_bytes": 5000000, "log_keep": 3},
+    {"name": "telegram", "enabled": false, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "telegram_agent.py"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "TELEGRAM_BOT_TOKEN", "ALLOWED_CHAT_IDS"], "log_max_bytes": 5000000, "log_keep": 3},
+    {"name": "discovery", "enabled": false, "command": ["C:/path/to/Agent/.venv/Scripts/python.exe", "discovery_worker.py", "--interval", "3600"], "cwd": "C:/path/to/Agent", "env_allowlist": ["CORE_URL", "CORE_API_KEY", "DISCOVERY_API_KEY", "DISCOVERY_RESOURCE_PAUSE_LEVEL"], "log_max_bytes": 5000000, "log_keep": 3}
+  ]
+}

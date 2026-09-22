@@ -1,0 +1,12 @@
+{
+  "name": "operator-context-goal-planning",
+  "objective": "Read the always-loaded operator/project context and current goals. Create at most three concrete non-duplicate local goals with measurable next actions that directly advance the operator's current priorities. Do not edit source code.",
+  "interval_seconds": 86400,
+  "enabled": false,
+  "payload": {
+    "goal_planning": true,
+    "approval_mode": "full_auto",
+    "max_steps": 12,
+    "max_parallel_reads": 4
+  }
+}

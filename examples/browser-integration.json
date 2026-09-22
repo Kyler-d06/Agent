@@ -1,0 +1,18 @@
+{
+  "name": "dashboard",
+  "type": "browser",
+  "url": "https://your-dashboard.example/",
+  "profile_dir": "C:/private-agent-data/browser-profiles/dashboard",
+  "headless": true,
+  "tools": [
+    {
+      "name": "read_status",
+      "description": "Read the observed service status from the dashboard.",
+      "effect": "read",
+      "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "steps": [{"action": "wait", "selector": "[data-testid='service-status']"}],
+      "result_selector": "[data-testid='service-status']",
+      "expected_text": "Operational"
+    }
+  ]
+}

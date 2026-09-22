@@ -1,0 +1,78 @@
+{
+  "routing": {
+    "free_first": true,
+    "allow_paid": false,
+    "max_concurrency": 1,
+    "daily_paid_budget_usd": 1.00,
+    "monthly_paid_budget_usd": 15.00,
+    "estimated_output_tokens": 4096
+  },
+  "providers": [
+    {
+      "name": "qwen-executor",
+      "type": "api",
+      "cost_class": "local",
+      "open_source": true,
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen3.5:9b",
+      "api_key_env": "LOCAL_MODEL_API_KEY",
+      "priority": 0,
+      "supports_tools": true,
+      "task_types": ["general", "operations", "office", "coding", "research", "forecast", "impact", "critic", "capability_build", "evaluation", "improvement", "memory_consolidation"]
+    },
+    {
+      "name": "deepseek-local-harness",
+      "type": "api",
+      "cost_class": "local",
+      "open_source": true,
+      "enabled": false,
+      "base_url": "http://127.0.0.1:20128/v1",
+      "model": "replace-with-local-deepseek-model-id",
+      "api_key_env": "LOCAL_MODEL_API_KEY",
+      "priority": 10,
+      "supports_tools": true
+    },
+    {
+      "name": "browser-pool",
+      "type": "playwright",
+      "transport_policy": "blocked",
+      "cost_class": "subscription",
+      "open_source": false,
+      "enabled": false,
+      "url": "https://replace-with-model-site.example/",
+      "headless": true,
+      "input_selector": "textarea",
+      "submit_selector": "button[type='submit']",
+      "response_selector": "[data-message-author-role='assistant']",
+      "response_text_selector": "[class*='markdown']",
+      "completion_selector": "button[aria-label*='Copy' i]",
+      "login_required_selector": "form input[type='password']",
+      "structured_text": true,
+      "priority": 20,
+      "accounts": [
+        {"name": "account-1", "profile_dir": "C:/private-agent-data/browser-profiles/model-account-1"},
+        {"name": "account-2", "profile_dir": "C:/private-agent-data/browser-profiles/model-account-2"}
+      ]
+    },
+    {
+      "name": "deepseek-paid",
+      "type": "api",
+      "cost_class": "paid",
+      "open_source": true,
+      "allow_paid": true,
+      "enabled": false,
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-v4-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "priority": 100,
+      "max_tokens": 8192,
+      "daily_budget_usd": 1.00,
+      "monthly_budget_usd": 15.00,
+      "pricing": {
+        "cached_input_per_million_usd": 0.0028,
+        "input_per_million_usd": 0.14,
+        "output_per_million_usd": 0.28
+      }
+    }
+  ]
+}

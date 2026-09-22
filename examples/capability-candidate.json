@@ -1,0 +1,14 @@
+{
+  "name": "normalize_whitespace",
+  "kind": "capability",
+  "content": {
+    "description": "Normalize whitespace in text without changing word order.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"text": {"type": "string"}},
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "code": "def run(args):\n    return ' '.join(args['text'].split())\n"
+  }
+}

@@ -39,7 +39,7 @@ Revoke and regenerate any Alpaca credential that has ever appeared in source.
 Then stop the harness and run:
 
 ```powershell
-Set-Location "C:\Users\kyler\OneDrive\Documents\Scripts\Code\Agent"
+Set-Location "$HOME\OneDrive\Documents\Scripts\Code\Agent"
 .\START_PILOT.cmd trading
 ```
 

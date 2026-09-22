@@ -1,0 +1,24 @@
+{
+  "name": "calculator_regression",
+  "min_score": 1.0,
+  "cases": [
+    {"input": {"expression": "2 + 3 * 4"}, "expected": "14"},
+    {"input": {"expression": "(2 + 3) * 4"}, "expected": "20"},
+    {"input": {"expression": "2^10"}, "expected": "1024"},
+    {"input": {"expression": "9 ÷ 3 × 2"}, "expected": "6.0"},
+    {"input": {"expression": "round(1.234, 2)"}, "expected": "1.23"},
+    {"input": {"expression": "max(1, 2, -5)"}, "expected": "2"},
+    {"input": {"expression": "min(8, 3) + abs(-2)"}, "expected": "5"},
+    {"input": {"expression": "sqrt(81)"}, "expected": "9.0"},
+    {"input": {"expression": "factorial(6)"}, "expected": "720"},
+    {"input": {"expression": "round(sin(pi / 2), 4)"}, "expected": "1.0"},
+    {"input": {"expression": "7 // 2 + 7 % 2"}, "expected": "4"},
+    {"input": {"expression": "1 / 0"}, "expected": "Error: division by zero"},
+    {"input": {"expression": "__import__('os').getcwd()"}, "matcher": "contains", "expected": "Calc error:"},
+    {"input": {"expression": "'a' * 1000000000"}, "matcher": "contains", "expected": "Calc error:"},
+    {"input": {"expression": "9 ** 999999999"}, "matcher": "contains", "expected": "Calc error:"},
+    {"input": {"expression": "factorial(999999999)"}, "matcher": "contains", "expected": "Calc error:"},
+    {"input": {"expression": "round(2.345, ndigits=2)"}, "matcher": "contains", "expected": "Calc error:"},
+    {"input": {"expression": "True + 1"}, "matcher": "contains", "expected": "Calc error:"}
+  ]
+}

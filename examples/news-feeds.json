@@ -1,0 +1,7 @@
+{
+  "feeds": [
+    {"name": "Megatron", "source_type": "x", "locator": "from:Megatron_ron -is:retweet -is:reply", "topics": ["geopolitics", "world"], "base_reliability": 0.5, "bias_notes": "Social account claims require independent corroboration.", "enabled": true, "config": {"max_pages": 5}},
+    {"name": "The Hormuz Report", "source_type": "x", "locator": "from:HormuzReport -is:retweet -is:reply", "topics": ["geopolitics", "energy", "shipping"], "base_reliability": 0.5, "bias_notes": "Social account claims require independent corroboration.", "enabled": true, "config": {"max_pages": 5}},
+    {"name": "Unusual Whales", "source_type": "x", "locator": "from:unusual_whales -is:retweet -is:reply", "topics": ["markets", "economy", "world"], "base_reliability": 0.5, "bias_notes": "Social account claims require independent corroboration.", "enabled": true, "config": {"max_pages": 5}}
+  ]
+}

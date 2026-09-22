@@ -41,6 +41,26 @@ Claude Desktop can launch the local stdio bridge directly. Put the JSON above in
 enable the `universal-assistant` tools in the conversation. Claude becomes an MCP
 client of the harness: it can inspect or operate the harness within its grants.
 
+### Cross-model handoff checkpoints
+
+When an MCP client connects, the bridge creates and continuously updates:
+
+`Model Handoffs/ACTIVE - Claude MCP.md`
+
+inside the configured Obsidian vault. Every MCP tool call adds a timestamped,
+secret-minimized activity row; full tool arguments and outputs are deliberately
+excluded. The bridge also exposes `save_handoff_checkpoint`, which records the
+objective, current status, completed work, decisions, changed files, tests, next
+steps, blockers, and notes for the next model. Tool responses remind the model to
+refresh the detailed checkpoint after four calls.
+
+Claude subscription quotas are not exposed through MCP, so the bridge cannot know
+the exact remaining percentage or predict the five-hour cutoff. The sheet is
+written from the beginning and throughout the session instead of waiting for a
+quota warning. A replacement model should read the active handoff before making
+changes, verify the recorded files/tests against current state, and then replace
+the detailed checkpoint as work progresses.
+
 This connection does **not** make Claude's subscription model callable by Ollama.
 MCP connects models to tools; Claude Desktop is not a model-serving MCP endpoint.
 
@@ -49,7 +69,7 @@ MCP connects models to tools; Claude Desktop is not a model-serving MCP endpoint
 Start a loopback Streamable HTTP server:
 
 ```powershell
-Set-Location "C:\Users\kyler\OneDrive\Documents\Scripts\Code\Agent"
+Set-Location "$HOME\OneDrive\Documents\Scripts\Code\Agent"
 .\.venv\Scripts\python.exe .\mcp_http_bridge.py
 ```
 
