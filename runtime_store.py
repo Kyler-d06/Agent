@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 CREATE TABLE IF NOT EXISTS permission_grants (
  id TEXT PRIMARY KEY, actor TEXT NOT NULL, tool TEXT NOT NULL, constraints_json TEXT NOT NULL,
  expires_at REAL NOT NULL, remaining INTEGER NOT NULL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS direct_permission_requests (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, tool TEXT NOT NULL,
+ args_json TEXT NOT NULL, request_id TEXT NOT NULL, created_at REAL NOT NULL,
+ resolved_at REAL, resolution TEXT, grant_id TEXT,
+ UNIQUE(actor,request_id));
 CREATE TABLE IF NOT EXISTS platform_events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL, job_id TEXT);
 CREATE TABLE IF NOT EXISTS memories (
@@ -182,6 +187,49 @@ class RuntimeStore:
         with self.connect() as db:
             db.execute("INSERT INTO platform_events(ts,kind,data_json,job_id) VALUES(?,?,?,?)",
                        (time.time(), str(kind)[:120], canonical(clean), str(job_id) if job_id else None))
+
+    def request_permission(self, actor, tool, args, request_id):
+        """Persist exact direct-MCP arguments for later owner review and one-use approval."""
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO direct_permission_requests"
+                "(actor,tool,args_json,request_id,created_at) VALUES(?,?,?,?,?)",
+                (str(actor), str(tool), canonical(args), str(request_id), time.time()),
+            )
+
+    def pending_permissions(self, limit=100):
+        limit = max(1, min(int(limit), 500))
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,actor,tool,args_json,request_id,created_at "
+                "FROM direct_permission_requests WHERE resolved_at IS NULL "
+                "ORDER BY id DESC LIMIT ?", (limit,),
+            ).fetchall()
+        return [{**dict(row), "args": json.loads(row["args_json"])} for row in rows]
+
+    def approve_permission(self, permission_id, expires_at):
+        """Atomically resolve one pending request and create its exact one-use grant."""
+        if expires_at <= time.time():
+            raise ValueError("future expiry required")
+        gid = uuid.uuid4().hex
+        now = time.time()
+        with self.connect(True) as db:
+            row = db.execute(
+                "SELECT * FROM direct_permission_requests WHERE id=? AND resolved_at IS NULL",
+                (int(permission_id),),
+            ).fetchone()
+            if not row:
+                raise ValueError("permission request is no longer pending")
+            db.execute(
+                "INSERT INTO permission_grants VALUES(?,?,?,?,?,?,?)",
+                (gid, row["actor"], row["tool"], row["args_json"], expires_at, 1, now),
+            )
+            db.execute(
+                "UPDATE direct_permission_requests SET resolved_at=?,resolution='approved_once',grant_id=? WHERE id=?",
+                (now, gid, row["id"]),
+            )
+        return {"id": gid, "actor": row["actor"], "tool": row["tool"],
+                "args": json.loads(row["args_json"]), "request_id": row["request_id"]}
 
     def audit(self, *, limit=100, kind="", job_id="", after_id=0):
         limit = max(1, min(int(limit), 500))

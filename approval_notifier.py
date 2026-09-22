@@ -34,6 +34,18 @@ def permission_request(job: dict) -> dict | None:
     return None
 
 
+def direct_permission_request(item: dict) -> dict | None:
+    if not item.get("id") or not item.get("actor") or not item.get("tool"):
+        return None
+    return {
+        "kind": "direct_tool",
+        "permission_id": item["id"],
+        "title": "Claude MCP needs permission",
+        "message": (f"Actor: {item['actor']}\n\nTool: {item['tool']}\n"
+                    f"Arguments: {json.dumps(item.get('args_summary') or {}, ensure_ascii=False)[:900]}"),
+    }
+
+
 def request_key(request: dict) -> str:
     payload = json.dumps(request, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
@@ -70,10 +82,17 @@ class ApprovalNotifier:
         os.replace(temporary, self.state_file)
 
     def poll_once(self) -> int:
+        pending = []
+        direct_response = self.client.request("GET", "/api/owner/permissions/pending", owner=True, timeout=15)
+        if not direct_response.get("ok"):
+            raise RuntimeError((direct_response.get("error") or {}).get("message") or "permission list unavailable")
+        for item in direct_response.get("result") or []:
+            request = direct_permission_request(item)
+            if request and request_key(request) not in self.seen:
+                pending.append(request)
         response = self.client.request("GET", "/api/jobs", params={"limit": 100}, owner=True, timeout=15)
         if not response.get("ok"):
             raise RuntimeError((response.get("error") or {}).get("message") or "job list unavailable")
-        pending = []
         for job in response.get("result") or []:
             if job.get("status") not in {"blocked", "awaiting_approval"}:
                 continue

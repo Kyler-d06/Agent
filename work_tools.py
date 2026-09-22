@@ -10,13 +10,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import tokenize
 import uuid
 import threading
 from pathlib import Path
 
-from platform_contracts import canonical, confined, object_schema, tool
+from platform_contracts import canonical, confined, object_schema, safe_env, tool
 
 
 TEXT = {"type": "string"}
@@ -35,6 +37,11 @@ WORK_TOOLS = [
          {"path": TEXT, "runner": {"type": "string", "enum": ["unittest", "pytest"]}}, effect="execute"),
     tool("workspace_diff", "Inspect the current Git patch without committing or pushing.", {"path": TEXT}),
     tool("workspace_fingerprint", "Hash the current non-private source tree to check whether tested files changed.", {"path": TEXT}),
+    tool("publish_public_branch", "Build the allowlisted secret-scanned public mirror, run its full tests, commit it to a new non-default branch, and push through the host credential manager. Never updates or merges main.",
+         {"branch": {"type": "string", "pattern": "^(?:claude|codex)/[a-z0-9][a-z0-9._/-]{0,80}$"},
+          "commit_message": {"type": "string", "minLength": 1, "maxLength": 200},
+          "base_branch": {"type": "string", "pattern": "^(?:main|codex/[a-z0-9][a-z0-9._/-]{0,80})$"}},
+         ["branch", "commit_message"], effect="external"),
     tool("worktree_create", "Create an isolated Git worktree under the work root for a coding task. Returns its relative workspace path.",
          {"path": TEXT, "branch": TEXT}, effect="execute"),
     tool("export_patch", "Export tracked changes and new text files as a patch artifact without committing or pushing.",
@@ -130,6 +137,76 @@ class WorkTools:
             if count != 1:
                 raise ValueError(f"old_str must match exactly once; found {count}")
             return self._write_file(path, current["content"].replace(old_str, new_str, 1), current["sha256"])
+
+    @staticmethod
+    def _public_git(args, cwd, timeout=300, check=True):
+        result = subprocess.run(["git", *args], cwd=cwd, env=safe_env(), capture_output=True, text=True,
+                                timeout=timeout, shell=False)
+        if check and result.returncode:
+            raise RuntimeError("public Git operation failed: " + (result.stderr or result.stdout)[-2000:])
+        return result
+
+    def _public_remote_url(self):
+        result = self._public_git(["remote", "get-url", "public"], self.root)
+        url = result.stdout.strip()
+        if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", url):
+            raise ValueError("configure a credential-free https://github.com/... public Git remote")
+        return url
+
+    @staticmethod
+    def _run_public_tests(root):
+        with tempfile.TemporaryDirectory(prefix="agent-public-tests-") as test_temp:
+            env = safe_env()
+            env["CORE_API_KEY"] = "public-export-test-key"
+            result = subprocess.run([sys.executable, "-m", "pytest", "-q", "--basetemp", test_temp], cwd=root,
+                                    env=env, capture_output=True, text=True, timeout=600, shell=False)
+        if result.returncode:
+            raise RuntimeError("public snapshot tests failed:\n" + (result.stdout + result.stderr)[-8000:])
+        return (result.stdout + result.stderr)[-8000:]
+
+    def publish_public_branch(self, branch, commit_message, base_branch="main"):
+        if branch in {"main", "master"} or ".." in branch or branch.endswith(".lock"):
+            raise ValueError("a new claude/ or codex/ branch is required")
+        if not re.fullmatch(r"(?:claude|codex)/[a-z0-9][a-z0-9._/-]{0,80}", branch):
+            raise ValueError("branch must start with claude/ or codex/ and use safe lowercase characters")
+        if not re.fullmatch(r"(?:main|codex/[a-z0-9][a-z0-9._/-]{0,80})", base_branch) or ".." in base_branch:
+            raise ValueError("base_branch must be main or an existing codex/ branch")
+        message = str(commit_message).strip()
+        if not message or len(message) > 200 or "\n" in message or "\r" in message:
+            raise ValueError("commit_message must be one line of 1-200 characters")
+        remote = self._public_remote_url()
+        from public_repo_export import export
+        with tempfile.TemporaryDirectory(prefix="agent-public-export-") as temporary:
+            output = Path(temporary)
+            exported = export(self.root, output)
+            tests = self._run_public_tests(output)
+            self._public_git(["init"], output)
+            self._public_git(["config", "user.name", "Claude via Universal Assistant"], output)
+            self._public_git(["config", "user.email", "noreply@users.noreply.github.com"], output)
+            self._public_git(["remote", "add", "origin", remote], output)
+            self._public_git(["fetch", "origin", base_branch], output)
+            exists = self._public_git(["ls-remote", "--exit-code", "--heads", "origin", branch], output,
+                                      timeout=60, check=False)
+            if exists.returncode == 0:
+                raise ValueError("remote branch already exists; choose a new branch")
+            if exists.returncode != 2:
+                raise RuntimeError("could not check the remote branch: " + exists.stderr[-2000:])
+            self._public_git(["reset", "--mixed", "FETCH_HEAD"], output)
+            self._public_git(["switch", "-c", branch], output)
+            self._public_git(["add", "-A"], output)
+            self._public_git(["diff", "--cached", "--check"], output)
+            changed = self._public_git(["diff", "--cached", "--quiet"], output, check=False)
+            if changed.returncode == 0:
+                raise ValueError("public mirror has no changes relative to the selected base")
+            if changed.returncode != 1:
+                raise RuntimeError("could not inspect the staged public mirror")
+            self._public_git(["commit", "-m", message], output)
+            commit = self._public_git(["rev-parse", "HEAD"], output).stdout.strip()
+            self._public_git(["push", "origin", f"HEAD:refs/heads/{branch}"], output, timeout=300)
+        repository = remote.removesuffix(".git")
+        return {"repository": repository, "branch": branch, "base_branch": base_branch, "commit": commit,
+                "files": exported["files"], "tests": tests,
+                "pull_request_url": f"{repository}/compare/{base_branch}...{branch}?expand=1"}
 
     def source_bug_scan(self, path="", limit=200):
         root = confined(self.root, path)

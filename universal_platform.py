@@ -293,6 +293,8 @@ class UniversalPlatform:
                 return replay
             raise LeaseLost("previous action outcome is uncertain; reconciliation required")
         if not self._authorize(actor, spec, args, job_id):
+            if not job_id:
+                self.store.request_permission(actor, name, args, request_id)
             self.store.event("permission.required", {"actor": actor, "tool": name, "args": args,
                                                      "request_id": request_id, "job_id": job_id})
             return {"ok": False, "error": {"message": "owner grant required for this tool and argument scope", "code": "approval_required"}, "tool": name, "args": args}
