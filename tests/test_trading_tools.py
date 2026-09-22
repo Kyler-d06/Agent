@@ -22,7 +22,8 @@ class TradingToolsTests(unittest.TestCase):
         names = {entry["name"] for entry in TRADING_TOOLS}
         self.assertEqual(names, {"trading_data_status", "collect_sp100_stock_bars", "backtest_stock_edges",
                                  "collect_sp100_options", "collect_kalshi_markets", "kalshi_paper_status",
-                                 "start_kalshi_paper", "record_kalshi_paper_fill", "reconcile_kalshi_paper"})
+                                 "start_kalshi_paper", "record_kalshi_paper_fill", "reconcile_kalshi_paper",
+                                 "search_stock_signals"})
         self.assertEqual(next(x for x in TRADING_TOOLS if x["name"] == "trading_data_status")["effect"], "read")
         self.assertTrue(all("order" not in name for name in names))
 

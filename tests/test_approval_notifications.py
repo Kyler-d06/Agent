@@ -17,6 +17,15 @@ def test_permission_request_extracts_exact_tool_action():
     assert "workspace_write" in request["message"] and "a.txt" in request["message"]
 
 
+def test_direct_permission_request_uses_secret_minimized_summary():
+    request = approval_notifier.direct_permission_request({
+        "id": 4, "actor": "claude", "tool": "publish_public_branch",
+        "args_summary": {"branch": "claude/test", "content": {"bytes": 9000, "sha256": "abc"}},
+    })
+    assert request["kind"] == "direct_tool"
+    assert "publish_public_branch" in request["message"] and "claude/test" in request["message"]
+
+
 def test_notifier_deduplicates_and_opens_command_center(tmp_path, monkeypatch):
     class Client:
         base = "http://127.0.0.1:5077"
@@ -58,6 +67,32 @@ def test_dashboard_approve_once_grants_exact_action_and_resumes(core, owner):
         assert row["remaining"] == 1
 
 
+def test_direct_mcp_request_appears_in_dashboard_and_gets_exact_one_use_grant(core, owner):
+    args = {"branch": "claude/review", "commit_message": "Verified change", "base_branch": "main"}
+    with core.app.app_context():
+        core.universal_platform.store.request_permission("claude", "publish_public_branch", args, "request-one")
+
+    with core.app.test_client() as client:
+        denied = client.get("/api/owner/permissions/pending", headers={"X-API-Key": "wrong"})
+        assert denied.status_code == 401
+        pending = client.get("/api/owner/permissions/pending", headers=owner).get_json()["result"]
+        assert len(pending) == 1
+        assert pending[0]["actor"] == "claude" and pending[0]["args_summary"]["branch"] == "claude/review"
+        state = client.get("/api/state", headers=owner).get_json()
+        assert state["pending_permissions"] == pending
+        approved = client.post("/api/owner/permissions/approve-once", headers=owner,
+                               json={"id": pending[0]["id"]})
+        assert approved.status_code == 200
+        assert client.get("/api/owner/permissions/pending", headers=owner).get_json()["result"] == []
+
+    with core.app.app_context():
+        row = core.get_db().execute(
+            "SELECT actor,tool,constraints_json,remaining FROM permission_grants"
+        ).fetchone()
+        assert row["actor"] == "claude" and row["tool"] == "publish_public_branch"
+        assert json.loads(row["constraints_json"]) == args and row["remaining"] == 1
+
+
 def test_dashboard_opens_only_configured_vault(core, owner, monkeypatch):
     opened = []
     monkeypatch.setattr(core.os, "startfile", opened.append, raising=False)
@@ -82,6 +117,7 @@ def test_rendered_command_center_javascript_parses(core):
     assert checked.returncode == 0, checked.stderr
     assert "Open Obsidian vault" in core.MAIN_PAGE
     assert "Approve once & resume" in core.MAIN_PAGE
+    assert "Claude MCP permission requests" in core.MAIN_PAGE
 
 
 def test_command_center_saves_validated_loop_frequencies(core, owner):

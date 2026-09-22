@@ -24,6 +24,7 @@ SECURITY: same rule as fileedit_app before it — this can execute files.
 Tailnet only, real password, never Funnel this out publicly.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -795,6 +796,32 @@ def search():
 
 # ---------- full state, for the dashboard's one-shot load ----------
 
+def _permission_args_summary(args):
+    """Return a useful owner preview without returning bulk content or credentials."""
+    summary = {}
+    for key, value in (redact(args) if isinstance(args, dict) else {}).items():
+        raw_value = args.get(key)
+        if isinstance(raw_value, str) and (len(raw_value) > 500 or key.lower() in {"content", "data", "text"}):
+            encoded = raw_value.encode("utf-8")
+            summary[key] = {"kind": "text", "bytes": len(encoded),
+                            "sha256": hashlib.sha256(encoded).hexdigest()}
+        elif isinstance(value, (dict, list)):
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            summary[key] = value if len(encoded) <= 1000 else {
+                "kind": type(value).__name__, "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        else:
+            summary[key] = value
+    return summary
+
+
+def _pending_direct_permissions():
+    return [{"id": row["id"], "actor": row["actor"], "tool": row["tool"],
+             "request_id": row["request_id"], "created_at": row["created_at"],
+             "args_summary": _permission_args_summary(row["args"])}
+            for row in universal_platform.store.pending_permissions(limit=100)]
+
 @app.route("/api/state")
 def state():
     db = get_db()
@@ -858,6 +885,7 @@ def state():
         "world_count": world_count, "knowledge_count": knowledge_count, "feed_count": feed_count,
         "model_count": model_count, "models": models, "forecasting": forecast_summary,
         "overnight_report": overnight_report,
+        "pending_permissions": _pending_direct_permissions(),
         "model_workbench": _model_workbench_state(),
         "configuration": {"workspace": ROOT_DIR, "obsidian_vault": OBSIDIAN_VAULT, "research_repo": RESEARCH_REPO,
                           "executor_only": EXECUTOR_ONLY,
@@ -1069,6 +1097,32 @@ def approve_job_action():
         "actor": "owner", "job_id": job_id, "tool": tool, "args": args, "grant_id": grant["id"],
     })
     return ok({"grant": grant, "job": resumed})
+
+
+@app.route("/api/owner/permissions/pending")
+def pending_direct_permissions():
+    if getattr(g, "actor", None) != "owner":
+        return err("owner access required", 403)
+    return ok(_pending_direct_permissions())
+
+
+@app.route("/api/owner/permissions/approve-once", methods=["POST"])
+@logged_tool("approve_direct_action")
+def approve_direct_permission():
+    if getattr(g, "actor", None) != "owner":
+        return err("owner access required", 403)
+    try:
+        permission_id = int((request.get_json(silent=True) or {}).get("id"))
+        approved = universal_platform.store.approve_permission(permission_id, time.time() + 600)
+    except (TypeError, ValueError) as exc:
+        return err(str(exc), 409)
+    universal_platform.store.event("permission.approved_once", {
+        "actor": "owner", "source": "direct_mcp", "permission_id": permission_id,
+        "request_actor": approved["actor"], "tool": approved["tool"],
+        "args": approved["args"], "grant_id": approved["id"],
+    })
+    return ok({"id": permission_id, "actor": approved["actor"],
+               "tool": approved["tool"], "grant": {"id": approved["id"]}})
 
 
 @app.route("/api/owner/open-configured-path", methods=["POST"])
@@ -2492,6 +2546,8 @@ function render(){
   const backtest = (latestBacktest||{}).backtest || null;
   const holdout = (backtest||{}).holdout || {};
   const paper = trading.kalshi_paper || null;
+  const pendingPermissions = state.pending_permissions || [];
+  const pendingPermissionRows = pendingPermissions.map(item=>`<div class="consent"><span style="flex:1"><b>${esc(item.actor)} requests ${esc(item.tool)}</b><br><span class="explain">${esc(JSON.stringify(item.args_summary||{}))}</span></span><button class="ghost" onclick="approveDirectPermission(${Number(item.id)})">Approve once</button></div>`).join('');
   const latestKalshi = (trading.datasets||[]).find(item=>String(item.dataset||'').startsWith('kalshi_'));
   const kalshiMarketRows = ((latestKalshi||{}).markets||[]).slice(0,12).map(row=>`<div class="row"><span style="flex:1"><b>${esc(row.ticker||'')}</b><br><span class="explain">${esc(row.title||'')}</span></span><span>Y ${row.yes_ask==null?'?':'$'+Number(row.yes_ask).toFixed(2)} · N ${row.no_ask==null?'?':'$'+Number(row.no_ask).toFixed(2)}</span>${paper?`<button class="toggle" onclick="selectKalshi('${encodeURIComponent(String(row.ticker||''))}','yes')">YES</button><button class="toggle" onclick="selectKalshi('${encodeURIComponent(String(row.ticker||''))}','no')">NO</button>`:''}</div>`).join('');
   const candidateRows = ((backtest||{}).candidates||[]).map(row=>`<tr><td>${esc(row.strategy||'')}</td><td>${esc(String((row.train||{}).trades||0))}</td><td>${Number((row.train||{}).expectancy_bps||0).toFixed(2)} bps</td><td>${esc(String((row.test||{}).trades||0))}</td><td>${Number((row.test||{}).expectancy_bps||0).toFixed(2)} bps</td><td>${Number((row.test||{}).profit_factor||0).toFixed(2)}</td></tr>`).join('');
@@ -2503,6 +2559,7 @@ function render(){
   const modelTaskRows = modelQueue.slice().sort((a,b)=>({high:0,normal:1,low:2}[a.priority]??1)-({high:0,normal:1,low:2}[b.priority]??1) || Number(a.created_at||0)-Number(b.created_at||0)).map(item=>`<article class="session"><div class="session-head"><span class="tag">${esc(item.status||'queued')}</span><span class="tag">${esc(item.target||'claude')}</span><span class="tag">${esc(item.priority||'normal')}</span><b style="flex:1">${esc(item.title||'Untitled task')}</b><span>${item.prompt_chars==null?'too long':esc(String(item.prompt_chars))+' chars'}</span></div><p>${esc(item.objective||'')}</p>${item.acceptance_criteria?`<details><summary>Acceptance criteria</summary><pre>${esc(item.acceptance_criteria)}</pre></details>`:''}<div class="row"><button class="ghost" onclick="copyModelPrompt('${esc(item.id)}')">Copy complete prompt</button>${(item.target||'claude')==='claude'||(item.target||'claude')==='any'?`<button class="ghost" onclick="openClaudeTask('${esc(item.id)}')">Open in Claude</button>`:''}<select class="input" style="max-width:150px" onchange="updateModelTask('${esc(item.id)}',this.value)">${['queued','active','blocked','done'].map(status=>`<option value="${status}" ${status===item.status?'selected':''}>${status}</option>`).join('')}</select><button class="toggle" onclick="removeModelTask('${esc(item.id)}')">Remove</button></div></article>`).join('');
   const views = {
     work: `<div class="view-title"><div><h2>Work sessions</h2><p>Each request becomes a durable, logged session. Open a session for its answer, tools, and verification.</p></div><span class="tag">${state.jobs.filter(j => ['queued','running'].includes(j.status)).length} active</span></div>
+      ${pendingPermissions.length?`<div class="panel"><h3>Claude MCP permission requests <span>${pendingPermissions.length} waiting</span></h3><div class="body"><p class="explain">Review the exact tool and a secret-minimized argument summary. Approval creates one exact, single-use grant valid for ten minutes; Claude must retry the same call.</p>${pendingPermissionRows}</div></div>`:''}
       ${state.jobs.map(j => `<article class="session"><div class="session-head"><span class="tag">${esc(j.status)}</span><span class="tag">${esc(j.engine || 'universal')}</span><span>${esc(j.id)}</span><span style="margin-left:auto">${esc(j.updated_at || '')}</span></div><div class="message user"><span class="message-label">You</span>${esc(j.objective)}</div><div class="message assistant"><span class="message-label">Assistant</span>${esc(jobOutput(j))}</div>${jobDetails(j)}</article>`).join('') || '<div class="panel"><div class="body"><p class="hint">No sessions yet. Start one below.</p></div></div>'}
       ${composerOpen ? `<div class="panel composer"><h3>New session <span>durable + audited <button class="icon composer-close" onclick="setComposerOpen(false)" title="Close new session panel" aria-label="Close new session panel">&times;</button></span></h3><div class="body actions"><textarea id="jobObjective" placeholder="Describe the result you want. Include files, constraints, and how success should be checked."></textarea><select id="jobEngine" class="input" onchange="updateEngineHelp()"><option value="universal">Universal durable agent</option><option value="dsh">DSH coding agent</option></select><select id="jobTemplate" class="input" onchange="updateTemplateHelp()"><option value="">general</option><option value="coding">coding</option><option value="research">research</option><option value="forecast">forecast</option><option value="impact">impact</option><option value="office">office</option><option value="browser">browser</option><option value="operations">operations</option></select><select id="jobPriority" class="input"><option value="0.5">normal priority</option><option value="0.9">high priority</option><option value="0.1">low priority</option></select><select id="approvalMode" class="input"><option value="suggest">suggest — approve every side effect</option><option value="auto_edit" selected>auto-edit — local file edits run</option><option value="full_auto">full-auto — use existing grants automatically</option></select><p id="engineHelp" class="explain">Runs through leases, checkpoints, permission grants, verified tools, and the full audit trail.</p><p id="templateHelp" class="explain">General answers and mixed tasks. The assistant chooses only relevant tools.</p><label class="consent"><input id="autoRepairOnFailure" type="checkbox" checked><span><b>Automatically diagnose harness failures.</b><br>Deterministic stuck-agent failures may queue a repair in an isolated source copy. Suggest mode still requires your grant, execution still requires an existing grant, and patches are never promoted automatically.</span></label><label class="consent"><input id="browserEscalation" type="checkbox" ${((platform.model_routes||[]).some(p=>p.enabled && p.type==='playwright' && p.transport_policy==='approved_browser'))?'':'disabled'}><span><b>Allow approved browser fallback for this job.</b><br>This may send the objective, bounded conversation, tool schemas, and tool results to a third party. It never enables policy-blocked providers. ${((platform.model_routes||[]).some(p=>p.enabled && p.type==='playwright' && p.transport_policy==='approved_browser'))?'':'No approved browser route is configured.'}</span></label><button class="ghost" onclick="queueJob()">Run as new logged job</button></div></div>` : `<button class="ghost composer-launcher" onclick="setComposerOpen(true)">+ New session</button>`}`,
     prompts: `<div class="view-title"><div><h2>Prompt & model queue</h2><p>Store your permanent operating rules once, combine them with reusable procedures, and launch bounded tasks without reconstructing prompts.</p></div><span class="tag">${modelQueue.filter(item=>item.status!=='done').length} open</span></div>
@@ -2724,6 +2781,12 @@ async function approveJobAction(jobId){
   if(!confirm('Approve exactly this displayed tool and argument set once, then resume the job?')) return;
   const response=await api('/api/owner/jobs/approve-once',post({id:jobId}));
   if(!response || response.ok===false){ alert(((response||{}).error||{}).message || 'Approval failed.'); return; }
+  await load();
+}
+async function approveDirectPermission(id){
+  const response=await api('/api/owner/permissions/approve-once',post({id}));
+  if(!response || response.ok===false){ alert(((response||{}).error||{}).message || 'Permission approval failed.'); return; }
+  alert('Approved once for ten minutes. Ask Claude to retry the same tool call.');
   await load();
 }
 async function approveCapability(jobId,name){

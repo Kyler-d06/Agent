@@ -23,6 +23,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from platform_contracts import confined, tool
+import signal_search
 
 
 TEXT = {"type": "string"}
@@ -53,6 +54,25 @@ TRADING_TOOLS = [
             "cost_bps": {"type": "number", "minimum": 0, "maximum": 100},
             "train_fraction": {"type": "number", "minimum": 0.5, "maximum": 0.85},
             "minimum_test_trades": {"type": "integer", "minimum": 5, "maximum": 500},
+            "report_title": TEXT,
+        },
+        ["dataset"],
+        effect="write",
+    ),
+    tool(
+        "search_stock_signals",
+        "Research-only bounded search over the four existing entry signals with ATR (1.5/2.0/2.5/3.0) and percentage (3/5/7/10) trailing stops, an initial protective stop, optional maximum hold, costs and slippage. Selects on chronological training and validation periods only; the untouched holdout is examined once and only when reveal_holdout is true. Writes JSON and an Obsidian report. Never places orders.",
+        {
+            "dataset": TEXT,
+            "cost_bps": {"type": "number", "minimum": 0, "maximum": 100},
+            "slippage_bps": {"type": "number", "minimum": 0, "maximum": 50},
+            "train_fraction": {"type": "number", "minimum": 0.3, "maximum": 0.7},
+            "validation_fraction": {"type": "number", "minimum": 0.1, "maximum": 0.3},
+            "minimum_train_trades": {"type": "integer", "minimum": 5, "maximum": 2000},
+            "minimum_validation_trades": {"type": "integer", "minimum": 5, "maximum": 1000},
+            "minimum_holdout_trades": {"type": "integer", "minimum": 5, "maximum": 1000},
+            "portfolio_slots": {"type": "integer", "minimum": 1, "maximum": 50},
+            "reveal_holdout": {"type": "boolean"},
             "report_title": TEXT,
         },
         ["dataset"],
@@ -203,7 +223,7 @@ class TradingTools:
                 "data_quality": value.get("data_quality"),
                 "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
             }
-            if value.get("dataset") == "stock_edge_backtest":
+            if value.get("dataset") in ("stock_edge_backtest", "stock_signal_search"):
                 metadata["backtest"] = {
                     "verdict": value.get("verdict"),
                     "selected_strategy": value.get("selected_strategy"),
@@ -658,6 +678,93 @@ class TradingTools:
         return {"artifact": {**artifact, "path": str(target.relative_to(self.root))},
                 "obsidian_report": report, "verdict": verdict, "selected_strategy": result["selected_strategy"],
                 "holdout": holdout}
+
+    def _holdout_ledger_path(self):
+        return confined(self.root, "trading_data/holdout_ledger.jsonl")
+
+    def _holdout_examined(self, source_sha256, period):
+        path = self._holdout_ledger_path()
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (entry.get("source_sha256"), entry.get("holdout_start"), entry.get("holdout_end")) == (
+                    source_sha256, period["start"], period["end"]):
+                return entry
+        return None
+
+    def search_stock_signals(self, dataset, cost_bps=10, slippage_bps=5, train_fraction=0.5,
+                             validation_fraction=0.25, minimum_train_trades=60,
+                             minimum_validation_trades=30, minimum_holdout_trades=30,
+                             portfolio_slots=10, reveal_holdout=False, report_title="S&P 100 signal search"):
+        source = confined(self.root, dataset)
+        if not source.is_file() or source.suffix.lower() != ".json":
+            raise ValueError("dataset must be a collected JSON file")
+        if source.stat().st_size > 250_000_000:
+            raise ValueError("dataset exceeds the 250 MB backtest limit")
+        raw = source.read_bytes()
+        document = json.loads(raw)
+        if document.get("dataset") != "sp100_stocks":
+            raise ValueError("search_stock_signals requires an sp100_stocks dataset")
+        if (document.get("data_quality") or {}).get("pagination_truncated"):
+            raise ValueError("dataset pagination was truncated; recollect it before searching")
+        configured = os.environ.get("OBSIDIAN_VAULT")
+        if not configured or not Path(configured).expanduser().is_dir():
+            raise RuntimeError("OBSIDIAN_VAULT must point to an existing vault before a signal search runs")
+        parameters = {"cost_bps": cost_bps, "slippage_bps": slippage_bps, "train_fraction": train_fraction,
+                      "validation_fraction": validation_fraction, "minimum_train_trades": minimum_train_trades,
+                      "minimum_validation_trades": minimum_validation_trades,
+                      "minimum_holdout_trades": minimum_holdout_trades, "portfolio_slots": portfolio_slots,
+                      "minimum_neighbor_fraction": 0.5}
+        search = signal_search.SignalSearch(document, **parameters)
+        selection = search.select()
+        chosen = selection["selected"]
+        source_sha = hashlib.sha256(raw).hexdigest()
+        fingerprint = hashlib.sha256(_json_bytes({
+            "source_sha256": source_sha, "parameters": parameters, "selected": chosen and chosen["key"],
+            "train": chosen and chosen["train"], "validation": chosen and chosen["validation"]})).hexdigest()
+        holdout = None
+        if reveal_holdout:
+            if chosen is None:
+                holdout = {"examined": False, "reason": "no candidate passed selection; the holdout was not examined"}
+            else:
+                period = selection["periods"]["holdout"]
+                prior = self._holdout_examined(source_sha, period)
+                if prior:
+                    raise RuntimeError("the holdout for this dataset was already examined at "
+                                       f"{prior.get('examined_at')}; it is no longer untouched. Collect newer data for a fresh holdout.")
+                ledger = self._holdout_ledger_path()
+                ledger.parent.mkdir(parents=True, exist_ok=True)
+                # Record the look BEFORE computing it, so a crash cannot leave a silent second look.
+                with ledger.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"source_sha256": source_sha, "holdout_start": period["start"],
+                                             "holdout_end": period["end"], "examined_at": _iso(_utc_now()),
+                                             "selected": chosen["key"], "selection_fingerprint": fingerprint},
+                                            sort_keys=True) + "\n")
+                holdout = search.examine_holdout(selection)
+        verdict = signal_search.final_verdict(selection, holdout)
+        now = _utc_now()
+        result = {
+            "schema_version": 1, "dataset": "stock_signal_search", "collected_at": _iso(now),
+            "record_count": selection["configs_tested"], "source_dataset": str(source.relative_to(self.root)),
+            "source_sha256": source_sha, "parameters": parameters, "verdict": verdict,
+            "selected_strategy": signal_search.describe(chosen["config"]) if chosen else None,
+            "holdout": holdout["selected"]["holdout"] if holdout and holdout.get("examined") else {},
+            "selection_fingerprint": fingerprint, "flags": selection["flags"], "warnings": selection["flags"],
+            "data_quality": {"paper_research_only": True, "symbols_used": selection["symbols_used"],
+                             "excluded_symbols": len(selection["excluded_symbols"])},
+            "selection": selection, "holdout_examination": holdout,
+        }
+        target = self._output_path(None, "signal_search")
+        artifact = self._atomic_create(target, result)
+        report = self._write_obsidian_report(report_title, signal_search.render_report(report_title, result))
+        return {"artifact": {**artifact, "path": str(target.relative_to(self.root))}, "obsidian_report": report,
+                "verdict": verdict, "selected_strategy": result["selected_strategy"],
+                "selection_fingerprint": fingerprint, "holdout_examined": bool(holdout and holdout.get("examined")),
+                "eligible_configs": selection["eligible_count"], "flags": selection["flags"]}
 
     @staticmethod
     def _realized_vol(bars):
