@@ -2,6 +2,7 @@
 
 Run: python mcp_bridge.py. Log diagnostics to stderr; stdout is protocol-only.
 """
+import argparse
 import asyncio
 import json
 import os
@@ -12,10 +13,27 @@ from pathlib import Path
 
 import requests
 
-from platform_contracts import actor_key
+from platform_contracts import actor_key, select_tools
 
 
 HANDOFF_TOOL = "save_handoff_checkpoint"
+FIND_TOOL = "find_capabilities"
+RUN_TOOL = "run_capability"
+MARKET_TOOL = "market_research"
+MCP_DOMAINS = {"compact", "markets", "coding", "research", "office", "operations", "all"}
+MARKET_OPERATIONS = {
+    "status": "trading_data_status",
+    "collect_stocks": "collect_sp100_stock_bars",
+    "backtest_stocks": "backtest_stock_edges",
+    "search_stock_signals": "search_stock_signals",
+    "collect_options": "collect_sp100_options",
+    "collect_kalshi": "collect_kalshi_markets",
+    "scan_candidates": "scan_market_edges",
+    "paper_status": "kalshi_paper_status",
+    "start_paper": "start_kalshi_paper",
+    "paper_fill": "record_kalshi_paper_fill",
+    "reconcile_paper": "reconcile_kalshi_paper",
+}
 HANDOFF_SCHEMA = {
     "type": "object",
     "properties": {
@@ -32,6 +50,85 @@ HANDOFF_SCHEMA = {
     "required": ["objective", "current_status", "next_steps"],
     "additionalProperties": False,
 }
+
+FIND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        "include_all_domains": {"type": "boolean"},
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+RUN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 120},
+        "arguments": {"type": "object"},
+    },
+    "required": ["name", "arguments"],
+    "additionalProperties": False,
+}
+MARKET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "operation": {"type": "string", "enum": sorted(MARKET_OPERATIONS)},
+        "parameters": {"type": "object"},
+    },
+    "required": ["operation"],
+    "additionalProperties": False,
+}
+
+
+def _domain_match(name: str, domain: str) -> bool:
+    if domain in {"all", "compact"}:
+        return True
+    groups = {
+        "markets": set(MARKET_OPERATIONS.values()),
+        "coding": {
+            "workspace_list", "workspace_read", "workspace_write", "workspace_patch", "workspace_test",
+            "workspace_diff", "workspace_fingerprint", "source_bug_scan", "source_copy_create",
+            "worktree_create", "export_patch", "register_artifact", "verify_artifact", "publish_public_branch",
+        },
+        "office": {"document_create", "document_inspect", "csv_summary", "write_research_report"},
+    }
+    if domain in groups:
+        return name in groups[domain]
+    if domain == "research":
+        return any(word in name for word in (
+            "research", "question", "hypothesis", "evidence", "experiment", "discovery", "prediction",
+            "forecast", "ontology", "world", "knowledge", "memory", "report",
+        ))
+    if domain == "operations":
+        return any(word in name for word in (
+            "status", "maintenance", "spending", "node", "mesh", "workflow", "event", "goal", "capability",
+        ))
+    return False
+
+
+def compact_tool_specs(domain="markets"):
+    """Small stable MCP surface; every underlying capability remains reachable through RUN_TOOL."""
+    if domain not in MCP_DOMAINS:
+        raise ValueError("unknown MCP domain")
+    specs = [
+        {"name": FIND_TOOL,
+         "description": f"Find exact Universal Assistant capabilities and schemas relevant to a task. Defaults to the {domain} domain; set include_all_domains only when necessary.",
+         "input_schema": FIND_SCHEMA},
+        {"name": RUN_TOOL,
+         "description": "Run one named capability with the exact arguments returned by find_capabilities. Existing permission, audit, confinement, and approval rules still apply.",
+         "input_schema": RUN_SCHEMA},
+    ]
+    if domain == "markets":
+        specs.append({
+            "name": MARKET_TOOL,
+            "description": "Run one paper-research market operation for stocks, options, Kalshi Bitcoin 15-minute, or weather. Collection and paper actions retain their existing approval gates; no live-order operation exists.",
+            "input_schema": MARKET_SCHEMA,
+        })
+    specs.append({"name": HANDOFF_TOOL,
+                  "description": "Update the active secret-minimized Markdown transfer sheet after major milestones.",
+                  "input_schema": HANDOFF_SCHEMA})
+    return specs
 
 
 class HandoffJournal:
@@ -182,11 +279,14 @@ def _obsidian_vault() -> Path:
     raise RuntimeError("OBSIDIAN_VAULT is not configured")
 
 
-def build_server():
+def build_server(domain=None):
     """Build the shared low-level server used by stdio and HTTP transports."""
     from mcp.server.lowlevel import Server
     import mcp.types as types
-    server = Server("universal-assistant")
+    domain = str(domain or os.environ.get("MCP_TOOL_DOMAIN") or "markets").strip().lower()
+    if domain not in MCP_DOMAINS:
+        raise ValueError("MCP_TOOL_DOMAIN must be compact, markets, coding, research, office, operations, or all")
+    server = Server("universal-assistant-" + domain)
     base = os.environ.get("CORE_URL", "http://127.0.0.1:5077").rstrip("/")
     headers = {"X-API-Key": os.environ.get("MCP_AGENT_KEY") or actor_key(_core_api_key(), "mcp")}
     journal = None
@@ -205,13 +305,14 @@ def build_server():
     @server.list_tools()
     async def list_tools():
         catalog = await asyncio.to_thread(request, "GET", "/api/tools")
-        tools = [types.Tool(name=t["name"], description=t["description"], inputSchema=t["input_schema"]) for t in catalog]
-        tools.append(types.Tool(
-            name=HANDOFF_TOOL,
-            description=("Update the active Markdown transfer sheet for the next model. Call at the start, after every "
-                         "major milestone, and at least every four MCP tool calls. Exclude credentials and secrets."),
-            inputSchema=HANDOFF_SCHEMA,
-        ))
+        exposed = catalog if domain == "all" else compact_tool_specs(domain)
+        tools = [types.Tool(name=t["name"], description=t["description"], inputSchema=t["input_schema"]) for t in exposed]
+        if domain == "all":
+            tools.append(types.Tool(
+                name=HANDOFF_TOOL,
+                description="Update the active secret-minimized Markdown transfer sheet after major milestones.",
+                inputSchema=HANDOFF_SCHEMA,
+            ))
         try:
             await asyncio.to_thread(handoff_journal)
         except Exception:
@@ -228,10 +329,29 @@ def build_server():
                 payload = {"ok": False, "error": {"code": "handoff_write_failed", "message": str(exc)[:500]}}
             return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(payload))],
                                         isError=not payload["ok"])
-        result = await asyncio.to_thread(request, "POST", "/api/tool-gateway",
-                                         json={"name": name, "args": arguments or {}, "request_id": uuid.uuid4().hex})
+        target, target_args = name, arguments or {}
+        if name == FIND_TOOL:
+            catalog = await asyncio.to_thread(request, "GET", "/api/tools")
+            candidates = catalog if target_args.get("include_all_domains") else [
+                item for item in catalog if _domain_match(item["name"], domain)
+            ]
+            selected = select_tools(candidates, target_args["query"], target_args.get("limit", 8))
+            result = {"ok": True, "result": selected, "error": None}
+        else:
+            if name == RUN_TOOL:
+                target, target_args = target_args["name"], target_args.get("arguments") or {}
+            elif name == MARKET_TOOL and domain == "markets":
+                target = MARKET_OPERATIONS[target_args["operation"]]
+                target_args = target_args.get("parameters") or {}
+            elif domain != "all":
+                result = {"ok": False, "error": {"code": "unknown_compact_tool",
+                                                   "message": "use find_capabilities then run_capability"}}
+                return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(result))], isError=True)
+            result = await asyncio.to_thread(request, "POST", "/api/tool-gateway",
+                                             json={"name": target, "args": target_args,
+                                                   "request_id": uuid.uuid4().hex})
         try:
-            count = await asyncio.to_thread(handoff_journal().record, name, result)
+            count = await asyncio.to_thread(handoff_journal().record, target, result)
             result["handoff"] = {
                 "path": str(handoff_journal().target),
                 "checkpoint_due": count >= 4,
@@ -247,7 +367,11 @@ def build_server():
 
 def main():
     from mcp.server.stdio import stdio_server
-    server = build_server()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--domain", choices=sorted(MCP_DOMAINS),
+                        default=os.environ.get("MCP_TOOL_DOMAIN", "markets"))
+    args = parser.parse_args()
+    server = build_server(args.domain)
 
     async def run():
         async with stdio_server() as (read, write):

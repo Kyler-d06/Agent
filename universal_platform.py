@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import time
@@ -52,6 +53,10 @@ EXTRA_TOOLS = [
           "population": {"type": "integer", "minimum": 2, "maximum": 8},
           "generations": {"type": "integer", "minimum": 1, "maximum": 5}}, ["name", "kind", "suite"], effect="execute"),
     tool("platform_status", "Inspect task completion, provider reliability, artifacts, and recent platform events."),
+    tool("slm_assist", "Use only the configured local small model for low-risk context compression, literal metric extraction, or request classification. Output is explicitly unverified and cannot establish a market edge, choose a trade, reveal a holdout, or execute an action.",
+         {"operation": {"type": "string", "enum": ["compress_evidence", "extract_metrics", "classify_request"]},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 50000},
+          "question": {"type": "string", "maxLength": 1000}}, ["operation", "evidence"]),
 ]
 
 ADMIN_TOOLS = {"approve_capability", "deprecate_capability", "set_capability_autonomy", "set_workflow_enabled", "toggle_ambient", "stage_capability", "test_capability", "propose_capability"}
@@ -60,6 +65,7 @@ LOCAL_WRITES = {"capture_note", "add_bookmark", "ingest_event", "create_question
 READ_POSTS = {"check_node", "build_context"}
 LOCAL_WRITES.add("sync_obsidian")  # Local SQLite-to-vault regeneration; no external call.
 LOCAL_WRITES.add("backtest_stock_edges")  # Deterministic local test + bounded Obsidian report.
+LOCAL_WRITES.add("scan_market_edges")  # Deterministic candidate scan + bounded Obsidian report.
 
 
 class UniversalPlatform:
@@ -268,6 +274,45 @@ class UniversalPlatform:
             return True
         return self.store.consume_grant(actor, spec["name"], args)
 
+    def _slm_assist(self, operation, evidence, question="", *, actor=None, job_id=None):
+        local = next((provider for provider in self.models.providers
+                      if provider.get("enabled", True) and provider.get("type", "api") == "api"
+                      and self.models._cost_class(provider) == "local"), None)
+        if local is None:
+            raise RuntimeError("no enabled local SLM provider is configured")
+        instructions = {
+            "compress_evidence": "Compress the supplied evidence without adding facts. Preserve numbers, caveats, file paths, and contradictory observations.",
+            "extract_metrics": "Extract only explicitly stated metrics, units, sample sizes, periods, costs, and warnings. Do not calculate missing values.",
+            "classify_request": "Classify the request as one or more of: stocks, options, kalshi_bitcoin, weather, coding, research, office, operations. Do not propose a strategy or action.",
+        }
+        prompt = (
+            "You are a low-risk local extraction component, not an analyst. "
+            "Never claim an edge, recommend a trade, invent a hypothesis, select parameters, or infer missing facts. "
+            "Return concise JSON with keys summary, extracted_facts, uncertainties, and required_verification. "
+            + instructions[operation] + "\nQuestion: " + str(question or "")[:1000]
+            + "\nEvidence:\n" + evidence
+        )
+        answer = self.models.chat(
+            [{"role": "user", "content": prompt}], temperature=0, task_type="general",
+            provider=local["name"], budget_seconds=120,
+            trace={"job_id": job_id, "actor": actor, "purpose": "slm_assist"},
+        )
+        content = answer.get("content") if isinstance(answer, dict) else None
+        try:
+            extracted = json.loads(content) if isinstance(content, str) else content
+        except json.JSONDecodeError:
+            extracted = {"summary": str(content or "")[:8000], "extracted_facts": [],
+                         "uncertainties": ["local model did not return valid JSON"],
+                         "required_verification": ["compare summary with source evidence"]}
+        if not isinstance(extracted, dict):
+            extracted = {"summary": str(extracted)[:8000], "extracted_facts": [],
+                         "uncertainties": ["unexpected local model output shape"],
+                         "required_verification": ["compare summary with source evidence"]}
+        return {"status": "unverified_slm_assist", "operation": operation,
+                "provider": local["name"], "source_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+                "output": extracted,
+                "warning": "Compression/extraction may omit or misstate details; verify against the source before decisions."}
+
     def invoke(self, actor, name, args, request_id, job_id=None, lease_token=None):
         spec = next((t for t in self.catalog() if t["name"] == name), None)
         if not spec:
@@ -331,6 +376,8 @@ class UniversalPlatform:
                 value = self.improvements.evolve(**args, promote=False)
             elif name == "platform_status":
                 value = self.status()
+            elif name == "slm_assist":
+                value = self._slm_assist(**args, actor=actor, job_id=job_id)
             elif name == "get_spending":
                 value = self.models.spending()
             elif name == "get_current_datetime":

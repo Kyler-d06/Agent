@@ -31,6 +31,7 @@ def test_core_boot_catalog_and_no_direct_agent_bypass(core, owner):
         names = [t["name"] for t in catalog]
         assert len(names) == len(set(names))
         assert {"discover_tools", "get_current_datetime", "workspace_test", "remember", "propose_improvement"} <= set(names)
+        assert "slm_assist" in names
         clock = c.post("/api/tool-gateway", headers=actor(), json={"name": "get_current_datetime", "args": {}, "request_id": "clock-1"}).get_json()
         assert clock["ok"] and clock["result"]["local_date"] and clock["result"]["timezone"]
         assert clock["result"]["utc_iso"].endswith("+00:00")
@@ -67,6 +68,31 @@ def test_core_boot_catalog_and_no_direct_agent_bypass(core, owner):
             rejected = assistant_client.post("/api/jobs/queue", headers=actor(),
                                              json={"objective": "forged disclosure", "payload": {"browser_escalation": True}})
         assert rejected.status_code == 403
+
+
+def test_slm_assist_uses_only_local_provider_and_marks_output_unverified(core, monkeypatch):
+    calls = []
+
+    def fake_chat(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        return {"role": "assistant", "content": json.dumps({
+            "summary": "12 trades; expectancy 3 bps after stated costs",
+            "extracted_facts": ["trades=12", "expectancy_bps=3"],
+            "uncertainties": ["small sample"],
+            "required_verification": ["recalculate from source rows"],
+        })}
+
+    monkeypatch.setattr(core.universal_platform.models, "chat", fake_chat)
+    result = invoke(core, "slm_assist", {
+        "operation": "extract_metrics",
+        "evidence": "trades=12 expectancy_bps=3 warning=small sample",
+    })
+    assert result["ok"] is True
+    payload = result["result"]
+    assert payload["status"] == "unverified_slm_assist"
+    assert payload["source_sha256"]
+    assert calls and calls[0]["provider"] == "local-qwen"
+    assert "Never claim an edge" in calls[0]["messages"][0]["content"]
 
 
 def test_actions_use_append_order_without_full_timestamp_sort(core, owner):
@@ -137,6 +163,13 @@ def test_command_center_safely_adds_claude_desktop_mcp_json(core, owner, tmp_pat
         assert state["configuration"]["claude_mcp"]["configured"] is True
         repeated = client.post("/api/owner/integrations/claude-mcp", headers=owner, json={}).get_json()["result"]
         assert repeated["changed"] is False and repeated["backup"] is None
+        switched = client.post("/api/owner/integrations/claude-mcp", headers=owner,
+                               json={"domain": "coding"}).get_json()["result"]
+        assert switched["changed"] is True and switched["domain"] == "coding"
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        assert saved["mcpServers"]["universal-assistant"] == core._claude_mcp_entry("coding")
+        assert client.post("/api/owner/integrations/claude-mcp", headers=owner,
+                           json={"domain": "unknown"}).status_code == 400
 
 
 def test_claude_config_path_prefers_microsoft_store_package(core, tmp_path, monkeypatch):

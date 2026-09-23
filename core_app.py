@@ -88,6 +88,7 @@ MANAGED_SECRET_SPECS = {
     "BRAVE_API_KEY": {"label": "Brave Search API key", "group": "Web research", "minimum": 8},
 }
 PROTECTED_SECRET_NAMES = {"CORE_PASSWORD", "CORE_API_KEY", "CORE_SECRET", "MCP_AGENT_KEY", "MCP_HTTP_TOKEN"}
+CLAUDE_MCP_DOMAINS = {"markets", "compact", "coding", "research", "office", "operations", "all"}
 
 DEFAULT_META_PROMPT = """Before doing any work, call save_handoff_checkpoint with the objective and initial plan. Refresh it after every major milestone and whenever checkpoint_due is true.
 
@@ -273,11 +274,13 @@ def _claude_desktop_config_path():
     return Path.home().resolve() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
-def _claude_mcp_entry():
+def _claude_mcp_entry(domain="markets"):
+    if domain not in CLAUDE_MCP_DOMAINS:
+        raise ValueError("unsupported Claude MCP domain")
     source = Path(__file__).resolve().parent
     project_python = source / ".venv" / "Scripts" / "python.exe"
     executable = project_python if project_python.is_file() else Path(sys.executable).resolve()
-    return {"command": str(executable), "args": [str(source / "mcp_bridge.py")]}
+    return {"command": str(executable), "args": [str(source / "mcp_bridge.py"), "--domain", domain]}
 
 
 def _claude_mcp_status():
@@ -292,7 +295,10 @@ def _claude_mcp_status():
         if not isinstance(value, dict):
             raise ValueError("configuration root is not an object")
         entry = (value.get("mcpServers") or {}).get("universal-assistant")
-        status["configured"] = entry == _claude_mcp_entry()
+        args = entry.get("args") if isinstance(entry, dict) else None
+        domain = args[-1] if isinstance(args, list) and len(args) >= 3 and args[-2] == "--domain" else None
+        status["domain"] = domain
+        status["configured"] = domain in CLAUDE_MCP_DOMAINS and entry == _claude_mcp_entry(domain)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         status.update({"valid": False, "error": str(exc)[:500]})
     return status
@@ -1256,6 +1262,9 @@ def configure_claude_mcp():
     """Merge the local stdio bridge into Claude Desktop without replacing other servers."""
     if getattr(g, "actor", None) != "owner":
         return err("owner access required", 403)
+    domain = str((request.get_json(silent=True) or {}).get("domain") or "markets").strip().lower()
+    if domain not in CLAUDE_MCP_DOMAINS:
+        return err("domain must be markets, compact, coding, research, office, operations, or all")
     path = _claude_desktop_config_path()
     backup = None
     try:
@@ -1273,7 +1282,7 @@ def configure_claude_mcp():
             servers = {}
         if not isinstance(servers, dict):
             return err("Claude Desktop mcpServers must be a JSON object")
-        entry = _claude_mcp_entry()
+        entry = _claude_mcp_entry(domain)
         changed = servers.get("universal-assistant") != entry
         servers["universal-assistant"] = entry
         config["mcpServers"] = servers
@@ -1292,10 +1301,10 @@ def configure_claude_mcp():
     except OSError as exc:
         return err(f"Could not update Claude Desktop configuration: {exc}", 500)
     universal_platform.store.event("configuration.claude_mcp_updated", {
-        "actor": "owner", "path": str(path), "changed": changed,
+        "actor": "owner", "path": str(path), "domain": domain, "changed": changed,
         "backup": str(backup) if backup else None, "claude_restart_required": True,
     })
-    return ok({"path": str(path), "configured": True, "changed": changed,
+    return ok({"path": str(path), "configured": True, "domain": domain, "changed": changed,
                "backup": str(backup) if backup else None, "claude_restart_required": True})
 
 
@@ -2543,6 +2552,8 @@ function render(){
   const trading = platform.trading || {datasets:[],count:0,live_trading_enabled:false};
   const latestStockDataset = (trading.datasets||[]).find(item=>item.dataset==='sp100_stocks');
   const latestBacktest = (trading.datasets||[]).find(item=>item.dataset==='stock_edge_backtest');
+  const latestOptions = (trading.datasets||[]).find(item=>item.dataset==='sp100_options');
+  const latestEdgeScan = (trading.datasets||[]).find(item=>item.dataset==='market_edge_scan');
   const backtest = (latestBacktest||{}).backtest || null;
   const holdout = (backtest||{}).holdout || {};
   const paper = trading.kalshi_paper || null;
@@ -2574,8 +2585,9 @@ function render(){
       <div class="grid"><div class="panel"><h3>Stocks: collect data <span>delayed SIP</span></h3><div class="body"><p class="explain">Screens current S&P 100 holdings using fixed volatility and liquidity thresholds.</p><label class="explain" for="tradingVol">Minimum annualized realized volatility</label><input id="tradingVol" class="input" type="number" min="0.05" max="3" step="0.05" value="0.20"><label class="explain" for="tradingMax">Maximum symbols</label><input id="tradingMax" class="input" type="number" min="5" max="100" value="30"><label class="explain" for="tradingLookback">History in days</label><input id="tradingLookback" class="input" type="number" min="180" max="1000" value="730"><button class="ghost" onclick="collectStocks('1Day')">Collect daily swing data</button><button class="toggle" onclick="collectStocks('1Hour')">Collect hourly data</button><p class="explain">After collection, use the backtest button. Requests end at least 20 minutes in the past.</p></div></div>
       <div class="panel"><h3>Stocks: run backtest <span>train → holdout</span></h3><div class="body"><p class="explain">Runs fixed momentum, pullback, mean-reversion, and breakout rules. Training ranks the rules; the later holdout is scored once.</p><label class="explain" for="tradingCost">Round-trip costs, basis points</label><input id="tradingCost" class="input" type="number" min="0" max="100" step="1" value="10"><button class="ghost" onclick="backtestLatestStock()" ${latestStockDataset?'':'disabled'}>Backtest latest dataset</button><p class="explain">${latestStockDataset?`Latest input: ${esc(latestStockDataset.path)}`:'Collect a stock dataset first.'}</p></div></div>
       <div class="panel"><h3>Kalshi paper experiment <span>public API · no funds</span></h3><div class="body"><p class="explain">Collect open markets, order books, candles, and rules. Paper fills use current public asks; P&amp;L is graded only from Kalshi's official settlement result.</p><button class="ghost" onclick="collectKalshi('bitcoin_15m')">Collect Bitcoin 15-minute markets</button><button class="toggle" onclick="collectKalshi('weather')">Collect weather markets</button>${kalshiMarketRows||'<p class="hint">Collect Kalshi markets to show selectable tickers and quotes.</p>'}${paper?`<div class="row"><span class="tag">virtual cash</span><span style="flex:1">$${Number(paper.cash_usd||0).toFixed(2)}</span><span>P&amp;L $${Number(paper.realized_pnl_usd||0).toFixed(2)}</span></div><div class="row"><span class="tag">positions</span><span style="flex:1">${(paper.open_positions||[]).length} open</span><span>${(paper.settled_positions||[]).length} settled</span></div><label class="explain" for="kalshiTicker">Market ticker selected by you or an outside model</label><input id="kalshiTicker" class="input" placeholder="KXBTC15M-..."><select id="kalshiSide" class="input"><option value="yes">YES</option><option value="no">NO</option></select><input id="kalshiSpend" class="input" type="number" min="0.01" max="10" step="0.01" value="1.00"><textarea id="kalshiRationale" placeholder="Explicit rationale from operator or outside model"></textarea><button class="ghost" onclick="placeKalshiPaper()">Record paper fill</button><button class="toggle" onclick="reconcileKalshiPaper()">Check official settlements</button>`:`<button class="ghost" onclick="startKalshiPaper()">Start $10 virtual bankroll</button>`}<p class="explain">There is deliberately no live-order capability. A real $10 deposit is not required for this paper stage.</p></div></div></div>
+      <div class="grid"><div class="panel"><h3>Options candidate laboratory <span>paper research</span></h3><div class="body"><p class="explain">Collects liquid contracts on volatile S&amp;P 100 underlyings, then ranks implied-versus-realized volatility discrepancies as hypotheses requiring historical option tests. A discrepancy is not treated as an edge.</p><button class="ghost" onclick="collectOptions('swing')">Collect swing option snapshot</button><button class="toggle" onclick="collectOptions('scalp')">Collect short-DTE snapshot</button><button class="ghost" onclick="scanLatestMarket('options')" ${latestOptions?'':'disabled'}>Scan latest options candidates</button><p class="path-value">${esc((latestOptions||{}).path||'Collect an options dataset first.')}</p></div></div><div class="panel"><h3>Kalshi deterministic scan <span>paper only</span></h3><div class="body"><p class="explain">Checks a collected Bitcoin or weather snapshot only for complete YES+NO ask cost below $1 after your fee buffer. Results still require simultaneous depth, exact fee, and rules verification.</p><label class="explain" for="edgeFeeBuffer">Complete-set fee buffer, USD</label><input id="edgeFeeBuffer" class="input" type="number" min="0" max="0.25" step="0.01" value="0.03"><button class="ghost" onclick="scanLatestMarket('kalshi')" ${latestKalshi?'':'disabled'}>Scan latest Kalshi snapshot</button><p class="path-value">${esc((latestEdgeScan||{}).path||'No deterministic candidate scan yet.')}</p>${latestEdgeScan?`<p class="explain"><b>${esc(((latestEdgeScan.scan||{}).candidate_count)||0)} candidates:</b> ${esc(((latestEdgeScan.scan||{}).verdict)||'unscored')}</p>`:''}</div></div></div>
       ${backtest?`<div class="panel"><h3>Latest stock backtest <span class="${String(backtest.verdict||'').startsWith('PROMISING')?'good':'warn'}">${esc(backtest.verdict||'unscored')}</span></h3><div class="body"><div class="grid"><div class="metric"><b>SELECTED RULE</b><span>${esc(backtest.selected_strategy||'none')}</span></div><div class="metric"><b>HOLDOUT TRADES</b><span>${esc(String(holdout.trades||0))}</span></div><div class="metric"><b>EXPECTANCY</b><span>${Number(holdout.expectancy_bps||0).toFixed(2)} bps/trade</span></div><div class="metric"><b>WIN RATE</b><span>${(Number(holdout.win_rate||0)*100).toFixed(1)}%</span></div><div class="metric"><b>PROFIT FACTOR</b><span>${Number(holdout.profit_factor||0).toFixed(2)}</span></div><div class="metric"><b>MAX DRAWDOWN</b><span>${(Number(holdout.max_drawdown||0)*100).toFixed(1)}%</span></div></div><table><thead><tr><th>Rule</th><th>Train trades</th><th>Train expectancy</th><th>Holdout trades</th><th>Holdout expectancy</th><th>Holdout PF</th></tr></thead><tbody>${candidateRows}</tbody></table><p class="path-value">${esc(latestBacktest.path||'')}</p></div></div>`:'<div class="panel"><div class="body"><p class="hint">No backtest result yet. The two recent Alpaca runs collected data only.</p></div></div>'}
-      <div class="panel"><h3>Claude through MCP <span class="${claudeMcp.configured?'good':claudeMcp.valid===false?'bad':'warn'}">${claudeMcp.configured?'configured':claudeMcp.valid===false?'invalid JSON':'not connected'}</span></h3><div class="body"><p class="explain">Claude is the analyst and MCP client; this harness is the permission-controlled executor. Claude can inspect datasets, compare evidence, select a market or rule to test, and request a virtual paper fill with its rationale. The harness performs the exact calculation, enforces permissions and the virtual bankroll, logs the call, and writes results.</p><button class="ghost" onclick="installClaudeMcp()">${claudeMcp.configured?'Repair or refresh Claude JSON':'Add Claude JSON automatically'}</button><p class="path-value">${esc(claudeMcp.path||'')}</p><p class="explain">This preserves other Claude settings and MCP servers. Fully quit and reopen Claude Desktop afterward, then enable <b>universal-assistant</b> tools in the conversation.</p>${claudeMcp.error?`<p class="bad">${esc(claudeMcp.error)}</p>`:''}</div></div>
+      <div class="panel"><h3>Claude through MCP <span class="${claudeMcp.configured?'good':claudeMcp.valid===false?'bad':'warn'}">${claudeMcp.configured?esc(claudeMcp.domain||'configured'):claudeMcp.valid===false?'invalid JSON':'not connected'}</span></h3><div class="body"><p class="explain">Claude is the analyst and MCP client; this harness is the permission-controlled executor. Compact domain servers preserve every capability through discovery and execution while avoiding the full 141-schema context cost.</p><label class="explain" for="claudeMcpDomain">Claude tool domain</label><select id="claudeMcpDomain" class="input">${['markets','compact','coding','research','office','operations','all'].map(value=>`<option value="${value}" ${value===(claudeMcp.domain||'markets')?'selected':''}>${value}${value==='all'?' · high context':''}</option>`).join('')}</select><button class="ghost" onclick="installClaudeMcp()">${claudeMcp.configured?'Apply selected domain':'Add Claude JSON automatically'}</button><p class="path-value">${esc(claudeMcp.path||'')}</p><p class="explain"><b>markets</b> is recommended for edge research and exposes four compact tools. <b>compact</b> keeps only discovery, execution, and handoff. Other domains bias discovery without removing access. <b>all</b> is compatibility mode and consumes far more Claude context. Fully quit and reopen Claude Desktop after changing this.</p>${claudeMcp.error?`<p class="bad">${esc(claudeMcp.error)}</p>`:''}</div></div>
       <div class="panel"><h3>Research history <span>${trading.count||0} artifacts</span></h3><div class="body">${(trading.datasets||[]).map(d=>`<div class="row"><span class="tag">${esc(d.dataset||'dataset')}</span><span style="flex:1">${esc(d.path)}</span><span>${esc(String(d.record_count==null?'?':d.record_count))} records</span></div>`).join('') || '<p class="hint">No trading artifacts yet.</p>'}</div></div>`,
     secrets: `<div class="view-title"><div><h2>Keys & connections</h2><p>Owner-only managed credentials. Existing values are never returned to the browser.</p></div><span class="tag">${managedSecrets.filter(item=>item.configured).length} configured</span></div><div class="grid"><div class="panel"><h3>Alpaca <span>${managedSecrets.filter(x=>x.group==='Alpaca').every(x=>x.configured)?'configured':'setup required'}</span></h3><div class="body"><label class="explain" for="alpacaKeyId">API key ID</label><input id="alpacaKeyId" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><label class="explain" for="alpacaSecret">API secret</label><input id="alpacaSecret" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><button class="ghost" onclick="saveSecretGroup([['APCA_API_KEY_ID','alpacaKeyId'],['APCA_API_SECRET_KEY','alpacaSecret']])">Save Alpaca credentials</button><p class="explain">Available to the stock collector immediately; restart remains recommended so every supervised process receives consistent state.</p></div></div><div class="panel"><h3>Telegram <span>${managedSecrets.filter(x=>x.group==='Telegram').every(x=>x.configured)?'configured':'optional'}</span></h3><div class="body"><label class="explain" for="telegramToken">Bot token</label><input id="telegramToken" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><label class="explain" for="telegramChats">Allowed private chat ID(s)</label><input id="telegramChats" class="input" type="password" autocomplete="new-password" placeholder="Numeric IDs separated by commas"><button class="ghost" onclick="saveSecretGroup([['TELEGRAM_BOT_TOKEN','telegramToken'],['ALLOWED_CHAT_IDS','telegramChats']])">Save Telegram settings</button><p class="explain">Telegram requires a restart. Only the allowlisted numeric chat IDs can use the bot.</p></div></div><div class="panel"><h3>Web research <span>optional</span></h3><div class="body"><label class="explain" for="braveKey">Brave Search API key</label><input id="braveKey" class="input" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"><button class="ghost" onclick="saveSecretGroup([['BRAVE_API_KEY','braveKey']])">Save search key</button><p class="explain">The free static web path remains available without this key.</p></div></div><div class="panel"><h3>Custom integration secret <span>advanced</span></h3><div class="body"><label class="explain" for="customSecretName">Environment name</label><input id="customSecretName" class="input" placeholder="INTEGRATION_EXAMPLE_TOKEN"><label class="explain" for="customSecretValue">Secret value</label><input id="customSecretValue" class="input" type="password" autocomplete="new-password"><button class="ghost" onclick="saveCustomSecret()">Save custom secret</button><p class="explain">Custom names must begin with <code>INTEGRATION_</code>. They are stored now and exposed only to the trusted core after restart—not to generated scripts or sandbox tests.</p></div></div></div><div class="panel"><h3>Configured inventory <span>values hidden</span></h3><div class="body">${managedSecrets.map(item=>`<div class="row"><span class="dot ${item.configured?'dot-online':'dot-unconfigured'}"></span><span style="flex:1">${esc(item.label)}</span><span>${item.configured?(item.age_days==null?'configured':esc(String(item.age_days))+' days old'):'not configured'}</span>${item.configured?`<button class="toggle" onclick="removeManagedSecret('${esc(item.name)}')">Remove</button>`:''}</div>`).join('')}</div></div>`,
     audit: `<div class="view-title"><div><h2>Audit & decisions</h2><p>Redacted, durable evidence for model routing, judgments, tools, permissions, checkpoints, and failures.</p></div><span class="tag">${auditRecords.length} recent</span></div><div class="panel"><h3>Automatic operations report <span>${overnightReport.updated_at ? esc(new Date(overnightReport.updated_at*1000).toLocaleString()) : 'waiting for first update'}</span></h3><div class="body"><p class="path-value">${esc(overnightReport.path || '')}</p><pre>${esc(overnightReport.content || 'The overnight report worker has not produced its first report yet.')}</pre></div></div><div class="panel"><div class="body">${auditRecords.map(record => `<details class="audit-item"><summary><span class="tag">${esc(record.kind)}</span><span>${esc(new Date(record.ts*1000).toLocaleString())}</span><span style="flex:1">${esc(auditSummary(record))}</span></summary><pre>${esc(JSON.stringify(record.data, null, 2))}</pre></details>`).join('') || '<p class="hint">No audit records.</p>'}</div></div>`,
@@ -2821,8 +2833,9 @@ async function savePaths(){
   alert('Folders saved. Stop and restart the pilot when you are ready to activate them.');
 }
 async function installClaudeMcp(){
-  if(!confirm('Add or refresh the Universal Assistant entry in Claude Desktop JSON? Existing settings and other MCP servers will be preserved.')) return;
-  const response=await api('/api/owner/integrations/claude-mcp',post({}));
+  const domain=document.getElementById('claudeMcpDomain')?.value || 'markets';
+  if(!confirm(`Configure Claude Desktop for the ${domain} MCP domain? Existing settings and other MCP servers will be preserved.`)) return;
+  const response=await api('/api/owner/integrations/claude-mcp',post({domain}));
   if(!response || response.ok===false){ alert(((response||{}).error||{}).message || 'Could not update Claude Desktop configuration.'); return; }
   const result=response.result||{};
   alert(`${result.changed?'Claude JSON updated.':'Claude JSON was already correct.'} Fully quit and reopen Claude Desktop.`);
@@ -2977,6 +2990,23 @@ async function backtestLatestStock(){
 }
 async function collectKalshi(kind){
   await runTradingTool('collect_kalshi_markets',{kind,max_markets:25,include_orderbooks:true,lookback_hours:48});
+}
+async function collectOptions(style){
+  await runTradingTool('collect_sp100_options',{style,max_underlyings:10,min_realized_vol:0.25,
+    feed:'indicative',stock_feed:'iex',min_option_volume:1,max_spread_pct:0.35});
+}
+async function scanLatestMarket(kind){
+  const datasets=(platform.trading||{}).datasets||[];
+  const latest=kind==='options'
+    ? datasets.find(item=>item.dataset==='sp100_options')
+    : datasets.find(item=>String(item.dataset||'').startsWith('kalshi_'));
+  if(!latest){ alert(`Collect a ${kind} dataset first.`); return; }
+  const fee=Number(document.getElementById('edgeFeeBuffer')?.value ?? 0.03);
+  const result=await tradingAction('scan_market_edges',{
+    dataset:latest.path,max_candidates:25,fee_buffer_usd:Number.isFinite(fee)?fee:0.03,
+    report_title:kind==='options'?'S&P 100 options candidate scan':'Kalshi complete-set candidate scan'
+  },'Run the deterministic paper-only candidate scan and write its report to Obsidian?');
+  if(result) alert(`${result.candidate_count} candidate(s). ${result.verdict}`);
 }
 async function tradingAction(name,args,message){
   if(message && !confirm(message)) return;

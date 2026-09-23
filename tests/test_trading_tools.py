@@ -23,7 +23,7 @@ class TradingToolsTests(unittest.TestCase):
         self.assertEqual(names, {"trading_data_status", "collect_sp100_stock_bars", "backtest_stock_edges",
                                  "collect_sp100_options", "collect_kalshi_markets", "kalshi_paper_status",
                                  "start_kalshi_paper", "record_kalshi_paper_fill", "reconcile_kalshi_paper",
-                                 "search_stock_signals"})
+                                 "search_stock_signals", "scan_market_edges"})
         self.assertEqual(next(x for x in TRADING_TOOLS if x["name"] == "trading_data_status")["effect"], "read")
         self.assertTrue(all("order" not in name for name in names))
 
@@ -203,6 +203,46 @@ class TradingToolsTests(unittest.TestCase):
         self.assertTrue(any("delayed/modified" in item for item in doc["warnings"]))
         self.assertNotIn("test-secret", json.dumps(doc))
         self.assertEqual(value["summary"]["record_count"], 1)
+
+    def test_options_scan_creates_hypothesis_queue_not_edge_claim(self):
+        vault = self.root / "vault"
+        vault.mkdir()
+        source = self.root / "trading_data/options.json"
+        source.parent.mkdir(parents=True)
+        source.write_text(json.dumps({
+            "dataset": "sp100_options", "underlyings": [{
+                "symbol": "AAA", "underlying_close": 100, "realized_vol_annualized": 0.25,
+                "options": [{"symbol": "AAA260101C00100000", "expiration": "2026-01-01",
+                             "option_type": "call", "strike": 100, "implied_volatility": 0.45,
+                             "spread_pct": 0.05, "volume": 100}],
+            }],
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"OBSIDIAN_VAULT": str(vault)}, clear=False):
+            result = self.tools.scan_market_edges("trading_data/options.json")
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertIn("HYPOTHESIS QUEUE ONLY", result["verdict"])
+        self.assertIn("historical option quotes", result["candidates"][0]["required_test"])
+
+    def test_kalshi_scan_only_flags_complete_set_below_payout_after_buffer(self):
+        vault = self.root / "vault"
+        vault.mkdir()
+        source = self.root / "trading_data/kalshi.json"
+        source.parent.mkdir(parents=True)
+        source.write_text(json.dumps({
+            "dataset": "kalshi_weather", "markets": [
+                {"market": {"ticker": "CHEAP", "title": "Test", "yes_ask": 40, "no_ask": 50}},
+                {"market": {"ticker": "FULL", "title": "Test 2", "yes_ask": 55, "no_ask": 45}},
+            ],
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"OBSIDIAN_VAULT": str(vault)}, clear=False):
+            result = self.tools.scan_market_edges("trading_data/kalshi.json", fee_buffer_usd=0.03)
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["candidates"][0]["ticker"], "CHEAP")
+        self.assertAlmostEqual(result["candidates"][0]["gross_margin_usd"], 0.07)
+        self.assertIn("VERIFY DEPTH", result["verdict"])
+        status = self.tools.trading_data_status()
+        scan = next(row for row in status["datasets"] if row["dataset"] == "market_edge_scan")
+        self.assertEqual(scan["scan"]["candidate_count"], 1)
 
     def test_output_must_be_confined_json_and_no_clobber(self):
         with self.assertRaises(ValueError):

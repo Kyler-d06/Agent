@@ -50,12 +50,12 @@ class BearerGuard:
         await self.app(scope, receive, send)
 
 
-def create_app(host="127.0.0.1", port=5078, token=None):
+def create_app(host="127.0.0.1", port=5078, token=None, domain="compact"):
     allowed_hosts = [f"{host}:{port}", host]
     if host in {"127.0.0.1", "localhost"}:
         allowed_hosts += [f"localhost:{port}", f"127.0.0.1:{port}"]
     manager = StreamableHTTPSessionManager(
-        app=build_server(), json_response=True, stateless=True,
+        app=build_server(domain), json_response=True, stateless=True,
         security_settings=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=sorted(set(allowed_hosts)),
@@ -81,6 +81,8 @@ def main():
                         help="required when binding beyond loopback; HTTPS must be supplied by a trusted proxy")
     parser.add_argument("--print-token", action="store_true",
                         help="print the transport token for explicit connector setup and exit")
+    parser.add_argument("--domain", choices=["compact", "markets", "coding", "research", "office", "operations", "all"],
+                        default=os.environ.get("MCP_TOOL_DOMAIN", "compact"))
     args = parser.parse_args()
     if args.print_token:
         print(transport_token())
@@ -88,7 +90,7 @@ def main():
     if args.host not in {"127.0.0.1", "localhost"} and not args.allow_network:
         parser.error("non-loopback binding requires --allow-network")
     import uvicorn
-    uvicorn.run(create_app(args.host, args.port), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(args.host, args.port, domain=args.domain), host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

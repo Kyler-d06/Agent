@@ -106,6 +106,18 @@ TRADING_TOOLS = [
         ["kind"],
         effect="external",
     ),
+    tool(
+        "scan_market_edges",
+        "Deterministically scan one collected options or Kalshi dataset for measurable research candidates. Options output is a volatility/liquidity hypothesis queue; Kalshi output only flags complete-set ask costs below payout after a fee buffer. Writes JSON and an Obsidian report; never places orders or claims a validated edge.",
+        {
+            "dataset": TEXT,
+            "max_candidates": {"type": "integer", "minimum": 1, "maximum": 100},
+            "fee_buffer_usd": {"type": "number", "minimum": 0, "maximum": 0.25},
+            "report_title": TEXT,
+        },
+        ["dataset"],
+        effect="write",
+    ),
     tool("kalshi_paper_status", "Inspect the local Kalshi paper account. Uses no funds and places no orders."),
     tool(
         "start_kalshi_paper",
@@ -234,6 +246,10 @@ class TradingTools:
                         "test": row.get("test") or {},
                     } for row in (value.get("candidates") or [])],
                 }
+            if value.get("dataset") == "market_edge_scan":
+                metadata["scan"] = {"market_dataset": value.get("market_dataset"),
+                                    "verdict": value.get("verdict"),
+                                    "candidate_count": len(value.get("candidates") or [])}
             if str(value.get("dataset") or "").startswith("kalshi_"):
                 metadata["markets"] = [{
                     "ticker": (row.get("market") or {}).get("ticker"),
@@ -270,6 +286,7 @@ class TradingTools:
                     "warnings": doc.get("warnings", []),
                     "data_quality": doc.get("data_quality"),
                     "backtest": doc.get("backtest"),
+                    "scan": doc.get("scan"),
                     "markets": doc.get("markets"),
                 })
             except (OSError, ValueError, json.JSONDecodeError):
@@ -982,3 +999,99 @@ class TradingTools:
         }
         artifact = self._atomic_create(target, result)
         return {"artifact": {**artifact, "path": str(target.relative_to(self.root))}, "summary": {k: result[k] for k in ("dataset", "collected_at", "record_count", "warnings")}, "errors": errors}
+
+    def scan_market_edges(self, dataset, max_candidates=25, fee_buffer_usd=0.03,
+                          report_title="Cross-market edge candidates"):
+        source = confined(self.root, dataset)
+        if not source.is_file() or source.suffix.lower() != ".json":
+            raise ValueError("dataset must be a collected JSON file")
+        if source.stat().st_size > 250_000_000:
+            raise ValueError("dataset exceeds the 250 MB scan limit")
+        raw = source.read_bytes()
+        document = json.loads(raw)
+        dataset_kind = str(document.get("dataset") or "")
+        candidates = []
+        if dataset_kind == "sp100_options":
+            for underlying in document.get("underlyings") or []:
+                realized = underlying.get("realized_vol_annualized")
+                if realized is None:
+                    continue
+                for option in underlying.get("options") or []:
+                    implied = option.get("implied_volatility")
+                    spread = option.get("spread_pct")
+                    volume = int(option.get("volume") or 0)
+                    if implied is None or spread is None or float(spread) < 0:
+                        continue
+                    gap = float(implied) - float(realized)
+                    score = abs(gap) * math.sqrt(max(1, volume)) / (0.01 + float(spread))
+                    candidates.append({
+                        "kind": "options_relative_volatility_candidate",
+                        "underlying": underlying.get("symbol"), "option_symbol": option.get("symbol"),
+                        "expiration": option.get("expiration"), "option_type": option.get("option_type"),
+                        "strike": option.get("strike"), "underlying_close": underlying.get("underlying_close"),
+                        "realized_vol_annualized": float(realized), "implied_volatility": float(implied),
+                        "iv_minus_realized": gap, "spread_pct": float(spread), "volume": volume,
+                        "screen_score": score,
+                        "required_test": "obtain historical option quotes and test delta-hedged outcomes after spreads, fees, and assignment risk",
+                    })
+            candidates.sort(key=lambda row: (-row["screen_score"], row.get("option_symbol") or ""))
+            verdict = "HYPOTHESIS QUEUE ONLY — HISTORICAL OPTION OUTCOMES REQUIRED"
+            limitations = [
+                "An implied-versus-realized volatility gap is not itself an edge or trade direction.",
+                "Snapshot ranking has selection bias and does not model volatility risk premium, skew, term structure, Greeks, fills, assignment, or hedging costs.",
+                "Candidates must pass chronological historical and paper tests before any capital decision.",
+            ]
+        elif dataset_kind in {"kalshi_bitcoin_15m", "kalshi_weather"}:
+            fee = float(fee_buffer_usd)
+            for record in document.get("markets") or []:
+                market = record.get("market") or {}
+                yes_ask, no_ask = self._market_ask(market, "yes"), self._market_ask(market, "no")
+                if yes_ask is None or no_ask is None:
+                    continue
+                complete_cost = float(yes_ask) + float(no_ask) + fee
+                if 0 < yes_ask < 1 and 0 < no_ask < 1 and complete_cost < 1:
+                    candidates.append({
+                        "kind": "kalshi_complete_set_candidate", "ticker": market.get("ticker"),
+                        "title": market.get("title"), "yes_ask_usd": yes_ask, "no_ask_usd": no_ask,
+                        "fee_buffer_usd": fee, "complete_set_cost_usd": complete_cost,
+                        "gross_margin_usd": 1 - complete_cost, "close_time": market.get("close_time"),
+                        "required_test": "verify simultaneous executable depth, exact fees, market rules, and settlement eligibility",
+                    })
+            candidates.sort(key=lambda row: (-row["gross_margin_usd"], row.get("ticker") or ""))
+            verdict = ("MECHANICAL PRICING CANDIDATES — VERIFY DEPTH, FEES, AND RULES"
+                       if candidates else "NO COMPLETE-SET PRICING CANDIDATE IN THIS SNAPSHOT")
+            limitations = [
+                "Public quotes may be stale and the two sides may not be simultaneously fillable at displayed asks.",
+                "The fee buffer is an assumption, not an authoritative Kalshi fee calculation.",
+                "This scanner does not authenticate, place orders, or interpret settlement rules.",
+            ]
+        else:
+            raise ValueError("scan_market_edges requires an sp100_options or collected Kalshi dataset")
+        candidates = candidates[:int(max_candidates)]
+        now = _utc_now()
+        result = {
+            "schema_version": 1, "dataset": "market_edge_scan", "market_dataset": dataset_kind,
+            "collected_at": _iso(now), "record_count": len(candidates),
+            "source_dataset": str(source.relative_to(self.root)),
+            "source_sha256": hashlib.sha256(raw).hexdigest(),
+            "parameters": {"max_candidates": int(max_candidates), "fee_buffer_usd": float(fee_buffer_usd)},
+            "verdict": verdict, "candidates": candidates,
+            "data_quality": {"paper_research_only": True, "validated_edge": False},
+            "warnings": limitations,
+        }
+        target = self._output_path(None, "market_edge_scans")
+        artifact = self._atomic_create(target, result)
+        lines = ["---", "tags: [trading-research, candidate-scan, paper-only]", f"created: {_iso(now)}", "---", "",
+                 f"# {report_title}", "", f"**Verdict:** {verdict}", "",
+                 f"Source: `{result['source_dataset']}`", f"Source SHA-256: `{result['source_sha256']}`", "",
+                 "## Candidates", ""]
+        if candidates:
+            lines.extend("- `" + str(row.get("ticker") or row.get("option_symbol") or "candidate") + "` — "
+                         + str(row.get("required_test")) for row in candidates)
+        else:
+            lines.append("- None found under the deterministic scan criteria.")
+        lines.extend(["", "## Limitations", "", *["- " + warning for warning in limitations]])
+        report = self._write_obsidian_report(report_title, "\n".join(lines) + "\n")
+        return {"artifact": {**artifact, "path": str(target.relative_to(self.root))},
+                "obsidian_report": report, "verdict": verdict, "candidate_count": len(candidates),
+                "candidates": candidates}

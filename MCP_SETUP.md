@@ -11,7 +11,9 @@ Use this MCP server entry in a client that accepts the common `mcpServers` forma
     "universal-assistant": {
       "command": "C:\\Users\\kyler\\OneDrive\\Documents\\Scripts\\Code\\Agent\\.venv\\Scripts\\python.exe",
       "args": [
-        "C:\\Users\\kyler\\OneDrive\\Documents\\Scripts\\Code\\Agent\\mcp_bridge.py"
+        "C:\\Users\\kyler\\OneDrive\\Documents\\Scripts\\Code\\Agent\\mcp_bridge.py",
+        "--domain",
+        "markets"
       ]
     }
   }
@@ -27,6 +29,15 @@ The bridge intentionally exposes the same permissions as the harness tool gatewa
 read-only tools can run directly, while edits, execution, external writes, and other
 effects still require the applicable operator grant. Diagnostics go to stderr;
 stdout remains MCP protocol only.
+
+The default `markets` domain exposes four compact tools instead of eagerly sending
+every underlying schema to Claude. `find_capabilities` retrieves exact schemas only
+when needed, `run_capability` can still reach every existing capability through the
+unchanged permission gateway, and `market_research` collapses stock, options, Kalshi
+Bitcoin 15-minute, and weather operations behind one parameterized surface. No
+capability is deleted. Advanced clients can launch the bridge with `--domain coding`,
+`research`, `office`, `operations`, `compact`, or `all`; use `all` only for compatibility
+because it sends the complete catalog into model context.
 
 ## Claude Desktop
 

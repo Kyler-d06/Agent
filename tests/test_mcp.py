@@ -79,7 +79,23 @@ def test_http_bridge_uses_separate_derived_transport_token(tmp_path, monkeypatch
 def test_http_bridge_rejects_missing_bearer_token(monkeypatch):
     from starlette.testclient import TestClient
     monkeypatch.setenv("CORE_API_KEY", "test-owner-key")
-    monkeypatch.setattr(mcp_http_bridge, "build_server", lambda: mcp_bridge.build_server())
+    monkeypatch.setattr(mcp_http_bridge, "build_server", lambda domain: mcp_bridge.build_server(domain))
     with TestClient(mcp_http_bridge.create_app(token="expected")) as client:
         response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     assert response.status_code == 401
+
+
+def test_compact_market_catalog_preserves_capabilities_without_eager_schemas():
+    specs = mcp_bridge.compact_tool_specs("markets")
+    names = {item["name"] for item in specs}
+    assert names == {"find_capabilities", "run_capability", "market_research", "save_handoff_checkpoint"}
+    encoded = json.dumps(specs, separators=(",", ":"))
+    assert len(encoded) < 5000
+    assert mcp_bridge.MARKET_OPERATIONS["search_stock_signals"] == "search_stock_signals"
+    assert mcp_bridge.MARKET_OPERATIONS["collect_kalshi"] == "collect_kalshi_markets"
+
+
+def test_every_compact_domain_keeps_generic_discovery_and_execution():
+    for domain in mcp_bridge.MCP_DOMAINS - {"all"}:
+        names = {item["name"] for item in mcp_bridge.compact_tool_specs(domain)}
+        assert {"find_capabilities", "run_capability", "save_handoff_checkpoint"} <= names

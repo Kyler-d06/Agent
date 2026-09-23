@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ["CORE_API_KEY"] = "test-owner-key"
+os.environ["MCP_TOOL_DOMAIN"] = "all"
 
 import mcp_bridge
 
