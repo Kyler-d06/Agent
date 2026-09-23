@@ -93,6 +93,14 @@ def test_direct_mcp_request_appears_in_dashboard_and_gets_exact_one_use_grant(co
         assert json.loads(row["constraints_json"]) == args and row["remaining"] == 1
 
 
+def test_repeated_direct_request_is_deduplicated(core):
+    args = {"branch": "claude/review", "commit_message": "Verified change", "base_branch": "main"}
+    with core.app.app_context():
+        core.universal_platform.store.request_permission("claude", "publish_public_branch", args, "one")
+        core.universal_platform.store.request_permission("claude", "publish_public_branch", args, "two")
+        assert len(core.universal_platform.store.pending_permissions()) == 1
+
+
 def test_dashboard_opens_only_configured_vault(core, owner, monkeypatch):
     opened = []
     monkeypatch.setattr(core.os, "startfile", opened.append, raising=False)
