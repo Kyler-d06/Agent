@@ -91,7 +91,7 @@ PROTECTED_SECRET_NAMES = {"CORE_PASSWORD", "CORE_API_KEY", "CORE_SECRET", "MCP_A
 
 DEFAULT_META_PROMPT = """Before doing any work, call save_handoff_checkpoint with the objective and initial plan. Refresh it after every major milestone and whenever checkpoint_due is true.
 
-Use universal-assistant MCP for local execution, data, tests, reports, and verification. Use GitHub for version-controlled development. Never commit directly to the default branch or merge a pull request.
+Use universal-assistant MCP for local execution, data, tests, reports, and verification. Use GitHub for version-controlled development. Never commit directly to the default branch or merge a pull request. After tests pass, use publish_public_branch to build the secret-scanned public snapshot and push a new claude/ review branch. If it returns approval_required, wait for the operator to approve the exact request in the Command Center, then retry the identical call once.
 
 Prioritize correctness, safety, evidence, YAGNI, the smallest complete solution, and clear one-line solutions when they remain readable and testable. Do not add speculative abstractions, dependencies, unrelated refactors, live-trading capability, or weakened permissions. Keep conversational output short and store durable detail in artifacts and the active handoff. Stop after the acceptance criteria pass.
 

@@ -190,11 +190,16 @@ class RuntimeStore:
 
     def request_permission(self, actor, tool, args, request_id):
         """Persist exact direct-MCP arguments for later owner review and one-use approval."""
+        args_json = canonical(args)
         with self.connect() as db:
             db.execute(
                 "INSERT OR IGNORE INTO direct_permission_requests"
-                "(actor,tool,args_json,request_id,created_at) VALUES(?,?,?,?,?)",
-                (str(actor), str(tool), canonical(args), str(request_id), time.time()),
+                "(actor,tool,args_json,request_id,created_at) "
+                "SELECT ?,?,?,?,? WHERE NOT EXISTS ("
+                "SELECT 1 FROM direct_permission_requests "
+                "WHERE actor=? AND tool=? AND args_json=? AND resolved_at IS NULL)",
+                (str(actor), str(tool), args_json, str(request_id), time.time(),
+                 str(actor), str(tool), args_json),
             )
 
     def pending_permissions(self, limit=100):

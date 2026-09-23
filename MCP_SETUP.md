@@ -61,6 +61,22 @@ quota warning. A replacement model should read the active handoff before making
 changes, verify the recorded files/tests against current state, and then replace
 the detailed checkpoint as work progresses.
 
+### Let Claude publish a tested review branch
+
+After its changes pass tests, Claude can call `publish_public_branch` with a new
+branch such as `claude/signal-experiment`, a one-line commit message, and either
+`main` or an existing `codex/...` branch as the base. The tool exports only the
+public allowlist, scans for managed secret values and credential patterns, and
+runs the complete exported test suite before asking for owner approval.
+
+The request appears in Command Center → Work and triggers the native Windows
+permission popup. Click **Approve once**, then tell Claude to retry the identical
+tool call. The grant is exact, single-use, and expires after ten minutes. The tool
+can only create a new `claude/...` or `codex/...` branch; it refuses `main`, refuses
+an existing remote branch, and never merges a pull request. GitHub authentication
+remains in Windows Git Credential Manager and is never returned to Claude or
+written into the public export.
+
 This connection does **not** make Claude's subscription model callable by Ollama.
 MCP connects models to tools; Claude Desktop is not a model-serving MCP endpoint.
 
