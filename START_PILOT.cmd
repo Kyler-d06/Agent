@@ -19,7 +19,9 @@ set "PATH_SETUP="
 if /I "%~1"=="configure" set "PATH_SETUP=--configure-paths"
 set "ALPACA_SETUP="
 if /I "%~1"=="trading" set "ALPACA_SETUP=--setup-alpaca"
-".venv\Scripts\python.exe" start_platform.py --pilot --setup-telegram %PATH_SETUP% %ALPACA_SETUP%
+set "TELEGRAM_SETUP="
+if /I "%~1"=="telegram" set "TELEGRAM_SETUP=--setup-telegram"
+".venv\Scripts\python.exe" start_platform.py --pilot %PATH_SETUP% %ALPACA_SETUP% %TELEGRAM_SETUP%
 if errorlevel 1 goto :failed
 exit /b 0
 
